@@ -87,7 +87,7 @@ Open the doc for a file before changing that file. This is not optional for a sm
 | `emaki-app/src/term_panel.rs` | `docs/channels.md` (The terminal panel) |
 | `emaki-app/src/panels.rs`, `panels/doc_edit.rs`, `branches.rs`, `spelling.rs`, `sublime.rs`, `file_icons.rs`, `html_web.rs`, `html_shot.rs`, `word.rs`, `fetch.rs`; `emaki-core/src/outline.rs`, `doc_edit.rs`, `git.rs`, `fsops.rs`, `indent.rs`, `format.rs`, `office.rs`, `quarto.rs`, `math.rs`, `latex.rs`, `typst_doc.rs`, `parquet_file.rs`, `web.rs`; a table's cells in `files.rs`; the vendored `text/format/quarto.rs` and `text/math.rs` | `docs/panels.md` |
 | The sidebar, sessions page, tabs, menus, rename, `route_scroll`, the top strip in `workbench.rs`; `main.rs`; `ui_state.rs`; `format.rs`; `i18n.rs`, `locales/words.json`, any word the window shows | `docs/window.md` |
-| Anything a person sees, new or changed: a control, a color, a layout; `workbench/settings.rs`; `look::ACCENTS`; `scripts/icon/` | `docs/design.md`, then the doc of the part it is in (the settings window: `docs/window.md`) |
+| Anything a person sees, new or changed: a control, a color, a layout; `workbench/settings.rs`; `look::ACCENTS`; `scripts/icon/`; the README's picture, `scripts/readme/` | `docs/design.md`, then the doc of the part it is in (the settings window: `docs/window.md`) |
 | `look.rs`, `fonts.rs`, `assets.rs`, `assets/`, `themes/`, the avatar; `scripts/home-scroll.py` | `docs/look.md` |
 | `emaki-core/src/agents.rs`; `emaki-app/src/agents_page.rs`; the Agents entry in the sidebar | `docs/agents.md` |
 | `emaki-core/src/build.rs`, `transcript.rs`, `archive.rs`, `model.rs`; anything that reads a Claude Code row or its registry | `docs/transcript-format.md` |
@@ -175,6 +175,7 @@ crates/emaki-app/         the window
   assets/icon/               the icon in every size, drawn by scripts/icon/icon.html
 scripts/make-app.sh        Emaki.app bundle for a quick local run, ad-hoc signed
 scripts/make-icon.sh       remakes assets/icon from scripts/icon/icon.html
+scripts/make-readme-gif.sh .github/readme.gif, the README's picture, from the drawing in scripts/readme/
 scripts/release-mac.sh     the signed, notarized, Finder-laid-out disk image
 scripts/dmg/               the disk image's background and the script that draws it
 scripts/splash/            the Windows installer's splash and the script that draws it

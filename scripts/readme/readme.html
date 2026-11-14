@@ -1,0 +1,613 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Emaki README GIF</title>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Source+Serif+4:ital,opsz,wght@0,8..60,400;0,8..60,600;1,8..60,400&family=JetBrains+Mono:wght@400;500&display=block">
+<style>
+  body { margin: 0; background: #F3F1EA; }
+  canvas { display: block; width: 100%; height: auto; }
+</style>
+</head>
+<body>
+<canvas id="c" width="1600" height="840"></canvas>
+<script>
+// The README's moving picture, drawn as emaki.lol draws Emaki: hairlines on
+// warm paper, each part a pale wash of its color with an edge of it, a
+// serif title and an italic serif line beside a mono one. The site's story,
+// From the IDE to the ADE: the IDE's window turns into Emaki's, then each
+// part that comes and goes plays in turn, named in the list at the right.
+// Laid out in a 1920 by 1008 box and drawn at the canvas's size. `frame(i)`
+// draws frame i at FPS and returns it as a PNG; `ready` waits for the faces
+// and the icon. scripts/make-readme-gif.sh renders every frame and makes
+// the GIF.
+
+const FPS = 30, LENGTH = 15;   // seconds, looped
+const W = 1920, H = 1008;
+const PAPER = '#F3F1EA', SHEET = '#F8F6F0', INK = '#1F1E1D', MUTED = '#77746B', LINE = '#8E8A80';
+// The site's accent and its sketch colors (css/theme.scss), a part each.
+const ACCENT = '#5061B3', OCHRE = '#9E793D', SLATE = '#4489AE', SAGE = '#578F63', MAUVE = '#986EA2', CLAUDE = '#D97757', GRAY = '#85818F';
+const SERIF = '"Source Serif 4", "Source Serif Pro", Georgia, serif';
+const MONO = '"JetBrains Mono", Menlo, monospace';
+const KEYS = 'system-ui, -apple-system, sans-serif';
+const CJK = '"Songti SC", "LXGW WenKai", serif';
+
+const canvas = document.getElementById('c');
+const ctx = canvas.getContext('2d');
+const icon = new Image();
+// From a file the icon would taint the canvas, and no frame could be read
+// back: the renderer hands it in as data (ICON).
+icon.src = window.ICON || '../../crates/emaki-app/assets/icon/icon-256.png';
+
+window.ready = Promise.all([
+  document.fonts.load(`600 84px ${SERIF}`), document.fonts.load(`400 52px ${SERIF}`),
+  document.fonts.load(`italic 400 30px ${SERIF}`), document.fonts.load(`400 28px ${MONO}`),
+  document.fonts.load(`500 28px ${MONO}`),
+  new Promise(r => { if (icon.complete) r(); else { icon.onload = r; icon.onerror = r; } }),
+]);
+
+// ---------------------------------------------------------------------------
+// Easing: the studio's ease out quint for what slides in, a firmer curve for
+// the window changing shape, and an ease in and out for the pointer.
+// ---------------------------------------------------------------------------
+function bezier(x1, y1, x2, y2) {
+  const a = (p1, p2) => 1 - 3 * p2 + 3 * p1, b = (p1, p2) => 3 * p2 - 6 * p1, c = p1 => 3 * p1;
+  const at = (t, p1, p2) => ((a(p1, p2) * t + b(p1, p2)) * t + c(p1)) * t;
+  const slope = (t, p1, p2) => 3 * a(p1, p2) * t * t + 2 * b(p1, p2) * t + c(p1);
+  return x => {
+    if (x <= 0) return 0; if (x >= 1) return 1;
+    let t = x;
+    for (let i = 0; i < 8; i++) { const s = slope(t, x1, x2); if (Math.abs(s) < 1e-6) break; t -= (at(t, x1, x2) - x) / s; }
+    return at(Math.min(1, Math.max(0, t)), y1, y2);
+  };
+}
+const QUINT = bezier(0.23, 1, 0.32, 1), SHAPE = bezier(0.65, 0, 0.35, 1), INOUT = bezier(0.45, 0, 0.25, 1);
+const clamp01 = v => Math.min(1, Math.max(0, v));
+const span = (t, t0, d) => clamp01((t - t0) / d);
+const mix = (a, b, k) => a + (b - a) * k;
+const mixR = (a, b, k) => ({ x: mix(a.x, b.x, k), y: mix(a.y, b.y, k), w: mix(a.w, b.w, k), h: mix(a.h, b.h, k) });
+const mixP = (a, b, k) => ({ x: mix(a.x, b.x, k), y: mix(a.y, b.y, k) });
+
+// ---------------------------------------------------------------------------
+// The window, and the places in it.
+// ---------------------------------------------------------------------------
+const WIN = { x: 86, y: 322, w: 1180, h: 610, r: 22 };
+const BAR = 46;                                     // the chrome's strip
+const TOPY = WIN.y + BAR + 10, FOOT = WIN.y + WIN.h - 14;
+
+// The IDE: an activity bar, the file browser with the outline and the
+// timeline under it, the code over the terminal, the agent chat at the edge.
+const IX = WIN.x + 12, IB = WIN.y + WIN.h - 40;
+const IDE = {
+  activity: { x: IX, y: TOPY, w: 34, h: IB - TOPY },
+  browser: { x: IX + 44, y: TOPY, w: 230, h: IB - TOPY - 72 },
+  outline: { x: IX + 44, y: IB - 62, w: 230, h: 26 },
+  timeline: { x: IX + 44, y: IB - 28, w: 230, h: 26 },
+  code: { x: IX + 284, y: TOPY, w: 560, h: (IB - TOPY) * 0.6 },
+  terminal: { x: IX + 284, y: TOPY + (IB - TOPY) * 0.6 + 10, w: 560, h: (IB - TOPY) * 0.4 - 10 },
+  chat: { x: IX + 854, y: TOPY, w: WIN.x + WIN.w - 12 - (IX + 854), h: IB - TOPY },
+};
+
+// Emaki: the sidebar at the left, the chat in the middle of what is left,
+// a margin each side of it with its seam, and what comes and goes.
+const EDGE = 250, M0 = WIN.x + EDGE + 12, M1 = WIN.x + WIN.w - 12;
+const CHAT_MOST = 560, MARGIN = 64;
+const PW = 220, FW = 270, TW = 260, DW = 150;      // files, a file, terminal, outline's drawer
+
+// The script, in seconds. Everything is worked out from it for any moment,
+// so a frame can be drawn on its own.
+const T = {
+  shape: 1.9,                     // the IDE's window turns into Emaki's
+  filesOn: 4.0, fileOn: 5.25, filesOff: 6.9,
+  shellOn: 7.75, shellOff: 9.05,
+  outlineOn: 9.9, outlineOff: 11.1,
+  agentOn: 11.95, agentOff: 13.15,
+  dip: 14.0,                      // Emaki's window gives way to the IDE's, for the loop
+};
+const SHAPED = 1.1, SLIDE = 0.45, DIP = 0.35, BACK = 0.45;
+
+// How far each part is in, 0 to 1.
+const amount = (t, on, off) => t < on ? 0 : t < off ? QUINT(span(t, on, SLIDE)) : 1 - QUINT(span(t, off, SLIDE));
+const files = t => amount(t, T.filesOn, T.filesOff);
+const file = t => amount(t, T.fileOn, T.filesOff);
+const shell = t => amount(t, T.shellOn, T.shellOff);
+const outline = t => amount(t, T.outlineOn, T.outlineOff);
+const agent = t => amount(t, T.agentOn, T.agentOff);
+
+// How far the window is Emaki's: 0 the IDE's, 1 Emaki's.
+const shaped = t => t < T.dip ? SHAPE(span(t, T.shape, SHAPED)) : 1;
+// The window's insides: faded out where Emaki's ended and in where the
+// IDE's begins, so the loop never runs the change backward.
+const inside = t => t < T.dip ? 1 : t < T.dip + DIP ? 1 - span(t, T.dip, DIP) : span(t, T.dip + DIP, BACK);
+const emakiShown = t => t < T.dip + DIP;
+
+// The chat's column, from what stands beside it.
+function columns(t) {
+  const left = PW * files(t) + FW * file(t) + DW * outline(t), right = TW * shell(t);
+  const a0 = M0 + left, a1 = M1 - right;
+  const w = Math.min(CHAT_MOST, a1 - a0 - MARGIN * 2);
+  const chat = { x: (a0 + a1) / 2 - w / 2, y: TOPY, w, h: FOOT - TOPY };
+  return { chat, seamL: chat.x - 40 - DW * outline(t), seamR: chat.x + chat.w + 40 };
+}
+
+// The buttons in the chrome, and the seams' knobs, where the pointer goes.
+const FILES_BTN = { x: M0 + 6, y: WIN.y + 11, w: 24, h: 24 };
+const SHELL_BTN = { x: M1 - 30, y: WIN.y + 11, w: 24, h: 24 };
+const KNOB_Y = (TOPY + FOOT) / 2;
+const centre = r => ({ x: r.x + r.w / 2 + 2, y: r.y + r.h / 2 + 2 });
+
+// Where the pointer is: a list of stops, each [time, point].
+const P = (x, y) => ({ x, y });
+const REST = P(1296, 948);
+const FILE_ROW = P(M0 + 120, TOPY + 128);
+const STOPS = [
+  [0, REST], [3.3, REST], [3.9, centre(FILES_BTN)], [4.7, centre(FILES_BTN)], [5.15, FILE_ROW], [6.3, FILE_ROW],
+  [6.8, centre(FILES_BTN)], [7.2, centre(FILES_BTN)], [7.65, centre(SHELL_BTN)], [8.95, centre(SHELL_BTN)],
+  [9.8, P(columns(9.8).seamL + 2, KNOB_Y + 2)], [11.0, P(columns(11.0).seamL + 2, KNOB_Y + 2)],
+  [11.85, P(columns(11.85).seamR + 2, KNOB_Y + 2)], [13.05, P(columns(13.05).seamR + 2, KNOB_Y + 2)],
+  [13.8, REST], [LENGTH, REST],
+];
+function pointer(t) {
+  for (let i = 1; i < STOPS.length; i++) {
+    const [t0, p0] = STOPS[i - 1], [t1, p1] = STOPS[i];
+    if (t <= t1) return mixP(p0, p1, INOUT(span(t, t0, t1 - t0)));
+  }
+  return STOPS[STOPS.length - 1][1];
+}
+const CLICKS = [T.filesOn, T.fileOn, T.filesOff, T.shellOn, T.shellOff, T.outlineOn, T.outlineOff, T.agentOn, T.agentOff];
+const pressing = t => CLICKS.some(c => t >= c - 0.1 && t < c + 0.06);
+
+// ---------------------------------------------------------------------------
+// The list at the right: what the window is, then each part with its keys,
+// lit while it shows, a shade darker once it has.
+// ---------------------------------------------------------------------------
+const ROWS = [
+  { name: 'Files', keys: ['⌘', '⇧', 'F'], says: 'the project, written in as it reads', color: OCHRE, on: [T.filesOn, T.filesOff + 0.2] },
+  { name: 'Terminal', keys: ['⌘', '⇧', 'S'], says: 'a shell beside the chat', color: SAGE, on: [T.shellOn, T.shellOff + 0.2] },
+  { name: 'Outline', keys: ['⌘', '⇧', 'O'], says: 'every round, by what came of it', color: MAUVE, on: [T.outlineOn, T.outlineOff + 0.2] },
+  { name: 'Agent CLI', keys: ['⌘', '⇧', 'L'], says: "the agent's own terminal", color: CLAUDE, on: [T.agentOn, T.agentOff + 0.2] },
+];
+
+// ---------------------------------------------------------------------------
+// Drawing.
+// ---------------------------------------------------------------------------
+function rr(x, y, w, h, r) {
+  r = Math.max(0, Math.min(r, w / 2, h / 2));
+  ctx.beginPath();
+  ctx.moveTo(x + r, y); ctx.arcTo(x + w, y, x + w, y + h, r); ctx.arcTo(x + w, y + h, x, y + h, r);
+  ctx.arcTo(x, y + h, x, y, r); ctx.arcTo(x, y, x + w, y, r); ctx.closePath();
+}
+function hex(c, a) {
+  const n = parseInt(c.slice(1), 16);
+  return `rgba(${n >> 16}, ${(n >> 8) & 255}, ${n & 255}, ${a})`;
+}
+function hair(x1, y1, x2, y2, color, w = 1.6) {
+  ctx.strokeStyle = color; ctx.lineWidth = w; ctx.lineCap = 'round';
+  ctx.beginPath(); ctx.moveTo(x1, y1); ctx.lineTo(x2, y2); ctx.stroke();
+}
+function ring(x, y, r, color, w = 1.6) { ctx.strokeStyle = color; ctx.lineWidth = w; ctx.beginPath(); ctx.arc(x, y, r, 0, Math.PI * 2); ctx.stroke(); }
+function dot(x, y, r, color) { ctx.fillStyle = color; ctx.beginPath(); ctx.arc(x, y, r, 0, Math.PI * 2); ctx.fill(); }
+function words(text, x, y, font, color, align = 'left') {
+  ctx.font = font; ctx.fillStyle = color; ctx.textAlign = align; ctx.textBaseline = 'alphabetic';
+  ctx.fillText(text, x, y); ctx.textAlign = 'left';
+}
+// Lines of a text, each a fraction of the width, as long as they fit.
+function lines(x, y, w, ks, step, color, bottom, lw = 1.6) {
+  for (const k of ks) { if (y > bottom) break; hair(x, y, x + w * k, y, color, lw); y += step; }
+  return y;
+}
+// Claude's mark, small: the asterisk the site draws for a session.
+function asterisk(x, y, r, color) {
+  ctx.strokeStyle = color; ctx.lineWidth = 1.6; ctx.lineCap = 'round';
+  for (let i = 0; i < 4; i++) {
+    const a = i * Math.PI / 4;
+    ctx.beginPath(); ctx.moveTo(x - Math.cos(a) * r, y - Math.sin(a) * r); ctx.lineTo(x + Math.cos(a) * r, y + Math.sin(a) * r); ctx.stroke();
+  }
+}
+
+// A pane as the site sketches one: a pale wash of its color and an edge of
+// it, its insides clipped to it, its name in its color.
+function pane(r, color, insides, name, nameAt = 0.62) {
+  if (r.w < 2 || r.h < 2) return;
+  ctx.save();
+  rr(r.x, r.y, r.w, r.h, 12); ctx.fillStyle = SHEET; ctx.fill();
+  ctx.fillStyle = hex(color, 0.09); ctx.fill();
+  ctx.save(); rr(r.x, r.y, r.w, r.h, 12); ctx.clip();
+  if (insides) insides(r);
+  if (name) words(name, r.x + r.w / 2, r.y + r.h * nameAt, `400 30px ${SERIF}`, color, 'center');
+  ctx.restore();
+  rr(r.x, r.y, r.w, r.h, 12); ctx.strokeStyle = color; ctx.lineWidth = 2; ctx.stroke();
+  ctx.restore();
+}
+
+function header() {
+  if (icon.complete && icon.naturalWidth) ctx.drawImage(icon, 78, 66, 84, 84);
+  words('Emaki', 182, 128, `400 54px ${SERIF}`, INK);
+  ctx.font = `400 54px ${SERIF}`;
+  const w = ctx.measureText('Emaki').width;
+  words('絵巻', 182 + w + 26, 126, `400 46px ${CJK}`, MUTED);
+  words('emaki.lol', W - 86, 120, `400 30px ${MONO}`, ACCENT, 'right');
+  words('From the IDE to the ADE', 82, 262, `600 84px ${SERIF}`, INK);
+}
+
+// The window's frame and chrome: the IDE's (arrows, an address, a status
+// bar) or Emaki's (its name, the two panels' buttons).
+function windowFrame() {
+  rr(WIN.x, WIN.y, WIN.w, WIN.h, WIN.r); ctx.fillStyle = SHEET; ctx.fill();
+  ctx.strokeStyle = LINE; ctx.lineWidth = 2; ctx.stroke();
+  for (const k of [0, 1, 2]) dot(WIN.x + 26 + k * 18, WIN.y + BAR / 2, 5, hex(LINE, 0.95));
+  hair(WIN.x + 2, WIN.y + BAR, WIN.x + WIN.w - 2, WIN.y + BAR, hex(LINE, 0.4), 1.4);
+}
+
+function ideChrome(a) {
+  ctx.save(); ctx.globalAlpha *= a;
+  const cx = WIN.x + WIN.w / 2;
+  hair(cx - 230, WIN.y + 17, cx - 238, WIN.y + 23, hex(LINE, 0.6)); hair(cx - 238, WIN.y + 23, cx - 230, WIN.y + 29, hex(LINE, 0.6));
+  hair(cx - 214, WIN.y + 17, cx - 206, WIN.y + 23, hex(LINE, 0.6)); hair(cx - 206, WIN.y + 23, cx - 214, WIN.y + 29, hex(LINE, 0.6));
+  rr(cx - 180, WIN.y + 12, 360, 22, 11); ctx.strokeStyle = hex(LINE, 0.6); ctx.lineWidth = 1.5; ctx.stroke();
+  for (const k of [0, 1, 2, 3]) hair(WIN.x + WIN.w - 150 + k * 32, WIN.y + BAR / 2, WIN.x + WIN.w - 132 + k * 32, WIN.y + BAR / 2, hex(LINE, 0.5));
+  // The status bar.
+  const y = WIN.y + WIN.h - 20;
+  rr(WIN.x + 14, y - 6, 34, 12, 6); ctx.fillStyle = ACCENT; ctx.fill();
+  hair(WIN.x + 62, y, WIN.x + 100, y, hex(LINE, 0.5)); dot(WIN.x + 116, y, 3.5, '#B0505F');
+  hair(WIN.x + 128, y, WIN.x + 150, y, hex(LINE, 0.5)); dot(WIN.x + 166, y, 3.5, OCHRE);
+  for (const k of [0, 1, 2, 3, 4]) hair(WIN.x + WIN.w - 290 + k * 56, y, WIN.x + WIN.w - 254 + k * 56, y, hex(LINE, 0.4));
+  ctx.restore();
+}
+
+function button(r, color, lit) {
+  rr(r.x, r.y, r.w, r.h, 6);
+  ctx.fillStyle = lit > 0 ? hex(color, 0.22 * lit) : 'rgba(0,0,0,0)'; ctx.fill();
+  ctx.strokeStyle = color; ctx.lineWidth = 2; ctx.stroke();
+}
+
+function emakiChrome(t, a) {
+  ctx.save(); ctx.globalAlpha *= a;
+  const x = WIN.x + 88;
+  if (icon.complete && icon.naturalWidth) ctx.drawImage(icon, x, WIN.y + 12, 22, 22);
+  words('Emaki', x + 30, WIN.y + 31, `400 26px ${SERIF}`, ACCENT);
+  button(FILES_BTN, OCHRE, files(t));
+  button(SHELL_BTN, SAGE, shell(t));
+  ctx.restore();
+}
+
+// The sidebar: the three rows, the projects with the open one's sessions,
+// the person at its foot.
+function sidebar(a) {
+  ctx.save(); ctx.globalAlpha *= a;
+  const x = WIN.x + 22;
+  hair(WIN.x + EDGE, WIN.y + BAR + 1, WIN.x + EDGE, WIN.y + WIN.h - 2, hex(LINE, 0.35), 1.4);
+  const rows = [['New Session', INK], ['All Sessions', MUTED], ['Agents', MUTED]];
+  rows.forEach(([name, ink], i) => {
+    const y = TOPY + 26 + i * 32;
+    ring(x + 8, y - 7, 8, i === 0 ? ACCENT : hex(LINE, 0.8));
+    words(name, x + 26, y, `400 21px ${SERIF}`, ink);
+  });
+  const box = { x: WIN.x + 14, y: TOPY + 120, w: EDGE - 28, h: FOOT - TOPY - 170 };
+  rr(box.x, box.y, box.w, box.h, 12); ctx.fillStyle = hex(ACCENT, 0.07); ctx.fill(); ctx.strokeStyle = ACCENT; ctx.lineWidth = 2; ctx.stroke();
+  words('Projects', box.x + 14, box.y + 28, `400 18px ${SERIF}`, MUTED);
+  rr(box.x + 8, box.y + 40, box.w - 16, 28, 8); ctx.strokeStyle = ACCENT; ctx.lineWidth = 2; ctx.stroke();
+  rr(box.x + 16, box.y + 47, 16, 14, 3); ctx.strokeStyle = hex(LINE, 0.8); ctx.lineWidth = 1.4; ctx.stroke();
+  words('emaki', box.x + 42, box.y + 61, `600 19px ${SERIF}`, INK);
+  hair(box.x + 24, box.y + 72, box.x + 24, box.y + 160, hex(LINE, 0.35), 1.4);
+  [CLAUDE, CLAUDE, SAGE].forEach((c, i) => {
+    const y = box.y + 92 + i * 28;
+    if (c === CLAUDE) asterisk(box.x + 42, y, 6, c); else ring(box.x + 42, y, 5, c);
+    hair(box.x + 58, y, box.x + 58 + [96, 70, 84][i], y, hex(LINE, 0.55));
+  });
+  for (const i of [0, 1]) {
+    const y = box.y + 190 + i * 32;
+    rr(box.x + 16, y - 8, 16, 14, 3); ctx.strokeStyle = hex(LINE, 0.7); ctx.lineWidth = 1.4; ctx.stroke();
+    hair(box.x + 42, y, box.x + 42 + [60, 84][i], y, hex(LINE, 0.5));
+  }
+  words('Sessions', box.x + box.w / 2, box.y + box.h - 18, `400 26px ${SERIF}`, ACCENT, 'center');
+  dot(x + 6, FOOT - 14, 7, hex(LINE, 0.9)); hair(x + 24, FOOT - 14, x + 90, FOOT - 14, hex(LINE, 0.5));
+  ctx.restore();
+}
+
+// The chat as Emaki draws it: the agent's words, the person's message at the
+// right, a tool's line, and the composer with its pills.
+function chatInsides(r) {
+  const faint = hex(LINE, 0.45), x = r.x + 22, w = r.w - 44;
+  let y = lines(x, r.y + 26, w, [0.86, 0.72, 0.5], 18, faint, r.y + r.h);
+  const bw = Math.min(260, w * 0.5);
+  rr(r.x + r.w - 22 - bw, y + 10, bw, 34, 17); ctx.strokeStyle = hex(LINE, 0.7); ctx.lineWidth = 1.6; ctx.stroke();
+  hair(r.x + r.w - bw, y + 27, r.x + r.w - 44, y + 27, hex(LINE, 0.5));
+  y += 66;
+  const tw = Math.min(330, w * 0.66);
+  rr(x, y, tw, 30, 9); ctx.strokeStyle = hex(LINE, 0.7); ctx.stroke(); dot(x + 16, y + 15, 3.5, INK); hair(x + 30, y + 15, x + tw * 0.75, y + 15, hex(LINE, 0.55));
+  lines(x, y + 66, w, [0.9, 0.62], 20, faint, r.y + r.h - 130);
+  const c = { x: r.x + 14, y: r.y + r.h - 108, w: r.w - 28, h: 94 };
+  rr(c.x, c.y, c.w, c.h, 14); ctx.fillStyle = SHEET; ctx.fill(); ctx.strokeStyle = hex(LINE, 0.85); ctx.lineWidth = 1.8; ctx.stroke();
+  hair(c.x + 18, c.y + 26, c.x + c.w * 0.55, c.y + 26, faint); hair(c.x + c.w * 0.58, c.y + 18, c.x + c.w * 0.58, c.y + 34, ACCENT, 2);
+  for (const k of [0, 1, 2]) { rr(c.x + 18 + k * 50, c.y + 58, 42, 18, 9); ctx.strokeStyle = hex(LINE, 0.7); ctx.lineWidth = 1.5; ctx.stroke(); }
+  ring(c.x + c.w - 26, c.y + 67, 11, ACCENT, 1.8);
+}
+
+// The IDE's chat at the edge: a narrow column, a message, a box to type in.
+function ideChatInsides(r) {
+  const faint = hex(LINE, 0.45), x = r.x + 18, w = r.w - 36;
+  asterisk(x + 6, r.y + 24, 7, MAUVE);
+  hair(x + w * 0.6, r.y + 24, x + w, r.y + 24, hex(LINE, 0.35));
+  hair(x, r.y + 62, x + w * 0.5, r.y + 62, hex(LINE, 0.6));
+  rr(x + w * 0.3, r.y + 86, w * 0.7, 28, 14); ctx.strokeStyle = hex(LINE, 0.7); ctx.lineWidth = 1.6; ctx.stroke();
+  asterisk(x + 6, r.y + 150, 7, MAUVE);
+  lines(x + 20, r.y + 150, w - 20, [0.7], 18, faint, r.y + r.h);
+  lines(x, r.y + 176, w, [0.9, 0.66], 18, faint, r.y + r.h - 120);
+  const c = { x: r.x + 10, y: r.y + r.h - 96, w: r.w - 20, h: 84 };
+  rr(c.x, c.y, c.w, c.h, 12); ctx.fillStyle = SHEET; ctx.fill(); ctx.strokeStyle = hex(LINE, 0.85); ctx.lineWidth = 1.8; ctx.stroke();
+  hair(c.x + 16, c.y + 24, c.x + c.w * 0.5, c.y + 24, faint);
+  dot(c.x + c.w - 22, c.y + c.h - 22, 9, ACCENT);
+}
+
+function codeInsides(r) {
+  const faint = hex(LINE, 0.4);
+  hair(r.x + 14, r.y + 18, r.x + 70, r.y + 18, hex(LINE, 0.8), 2); hair(r.x + 14, r.y + 28, r.x + 112, r.y + 28, SLATE, 2.4);
+  hair(r.x + 140, r.y + 18, r.x + 180, r.y + 18, faint); hair(r.x + 210, r.y + 18, r.x + 250, r.y + 18, faint);
+  let y = r.y + 58;
+  const ks = [[0, 0.3], [0.08, 0.5], [0.08, 0.35, 0.44, 0.62], [0.14, 0.4], [0.14, 0.32, 0.4, 0.66], [0.08, 0.3], [0.08, 0.46], [0, 0.18]];
+  for (const k of ks) { if (y > r.y + r.h - 16) break; hair(r.x + 44 + k[0] * (r.w - 100), y, r.x + 44 + k[1] * (r.w - 100), y, faint); if (k[2]) hair(r.x + 44 + k[2] * (r.w - 100), y, r.x + 44 + k[3] * (r.w - 100), y, faint); y += 22; }
+  hair(r.x + r.w - 30, r.y + 46, r.x + r.w - 30, r.y + r.h - 10, hex(LINE, 0.25));
+}
+function terminalInsides(r) {
+  const faint = hex(LINE, 0.45);
+  hair(r.x + r.w / 2 - 24, r.y + 14, r.x + r.w / 2 + 24, r.y + 14, hex(LINE, 0.6)); hair(r.x + r.w / 2 - 24, r.y + 24, r.x + r.w / 2 + 24, r.y + 24, SAGE, 2);
+  hair(r.x + 16, r.y + 50, r.x + 22, r.y + 56, SAGE); hair(r.x + 22, r.y + 56, r.x + 16, r.y + 62, SAGE);
+  hair(r.x + 34, r.y + 56, r.x + 120, r.y + 56, hex(LINE, 0.6)); ctx.fillStyle = ACCENT; ctx.fillRect(r.x + 128, r.y + 47, 8, 18);
+  lines(r.x + 16, r.y + 88, r.w - 32, [0.3, 0.42], 20, faint, r.y + r.h - 10);
+}
+function browserInsides(r) {
+  const soft = hex(OCHRE, 0.55), faint = hex(LINE, 0.45);
+  words('File Browser', r.x + 18, r.y + 34, `600 24px ${SERIF}`, OCHRE);
+  const rows = [[0, 'v'], [1, '>'], [1, 'v'], [2, 'f'], [2, 'f'], [2, 'f'], [1, '>'], [1, 'f'], [0, 'f']];
+  rows.forEach(([d, k], i) => {
+    const x = r.x + 18 + d * 20, y = r.y + 64 + i * 26;
+    if (y > r.y + r.h - 12) return;
+    if (k === 'f') { rr(x, y - 7, 11, 13, 2); ctx.strokeStyle = soft; ctx.lineWidth = 1.4; ctx.stroke(); }
+    else if (k === 'v') { hair(x, y - 4, x + 5, y + 1, soft); hair(x + 5, y + 1, x + 10, y - 4, soft); }
+    else { hair(x + 2, y - 5, x + 7, y, soft); hair(x + 7, y, x + 2, y + 5, soft); }
+    hair(x + 22, y, x + 22 + 60 + (i * 17) % 40, y, faint);
+  });
+}
+function strip(r, name) {
+  hair(r.x + 14, r.y + r.h / 2 - 4, r.x + 18, r.y + r.h / 2, hex(OCHRE, 0.7)); hair(r.x + 18, r.y + r.h / 2, r.x + 14, r.y + r.h / 2 + 4, hex(OCHRE, 0.7));
+  words(name, r.x + 30, r.y + r.h / 2 + 7, `400 19px ${SERIF}`, OCHRE);
+}
+function activityInsides(r) {
+  for (const i of [0, 1, 2, 3]) { rr(r.x + 9, r.y + 14 + i * 34, 16, 16, 3); ctx.strokeStyle = hex(LINE, 0.7); ctx.lineWidth = 1.4; ctx.stroke(); }
+  for (const i of [0, 1]) ring(r.x + 17, r.y + r.h - 46 + i * 30, 7, hex(LINE, 0.6));
+  ctx.save(); ctx.translate(r.x + 23, r.y + r.h / 2 + 50); ctx.rotate(-Math.PI / 2);
+  words('Activity Bar', 0, 0, `400 18px ${SERIF}`, MUTED); ctx.restore();
+}
+
+// The files panel: the tree, the row of the file that is open lit.
+function filesInsides(r, picked) {
+  const soft = hex(OCHRE, 0.6), faint = hex(LINE, 0.55);
+  rr(r.x + 12, r.y + 14, Math.min(130, r.w - 24), 26, 13); ctx.strokeStyle = hex(LINE, 0.75); ctx.lineWidth = 1.5; ctx.stroke();
+  dot(r.x + 26, r.y + 27, 3, INK); hair(r.x + 36, r.y + 27, r.x + Math.min(120, r.w - 30), r.y + 27, hex(LINE, 0.5));
+  const rows = [[0, 'v', 70], [1, 'f', 80], [1, 'f', 60], [1, '>', 50], [0, 'f', 74], [0, 'f', 66], [0, 'f', 52], [0, 'f', 80], [0, 'f', 58]];
+  rows.forEach(([d, k, len], i) => {
+    const x = r.x + 18 + d * 18, y = r.y + 68 + i * 30;
+    if (y > r.y + r.h - 50) return;
+    if (i === 1 && picked > 0) {
+      rr(r.x + 8, y - 13, r.w - 16, 26, 7); ctx.fillStyle = hex(OCHRE, 0.12 * picked); ctx.fill();
+      ctx.strokeStyle = hex(OCHRE, picked); ctx.lineWidth = 2; ctx.stroke();
+    }
+    if (k === 'f') { rr(x, y - 7, 11, 14, 2); ctx.strokeStyle = soft; ctx.lineWidth = 1.4; ctx.stroke(); }
+    else if (k === 'v') { hair(x, y - 3, x + 5, y + 2, soft); hair(x + 5, y + 2, x + 10, y - 3, soft); }
+    else { hair(x + 2, y - 5, x + 7, y, soft); hair(x + 7, y, x + 2, y + 5, soft); }
+    hair(x + 20, y, x + 20 + len, y, faint);
+    if (i === 4 || i === 6) dot(r.x + r.w - 20, y, 3, OCHRE);
+  });
+}
+// A file open beside the tree, drawn as it reads: its heading, its words,
+// a list, and a run of code folded to one quiet row.
+function fileInsides(r) {
+  const faint = hex(LINE, 0.5), x = r.x + 20, w = r.w - 40;
+  rr(x - 6, r.y + 12, 13, 15, 2); ctx.strokeStyle = hex(OCHRE, 0.7); ctx.lineWidth = 1.4; ctx.stroke();
+  hair(x + 16, r.y + 20, x + 90, r.y + 20, hex(LINE, 0.7), 2);
+  hair(r.x + 8, r.y + 40, r.x + r.w - 8, r.y + 40, hex(OCHRE, 0.3), 1.2);
+  hair(x, r.y + 74, x + w * 0.62, r.y + 74, INK, 6);
+  let y = lines(x, r.y + 108, w, [0.95, 0.88, 0.6], 20, faint, r.y + r.h);
+  for (const k of [0.7, 0.55]) { dot(x + 4, y + 8, 3, hex(LINE, 0.9)); hair(x + 18, y + 8, x + 18 + (w - 18) * k, y + 8, faint); y += 24; }
+  y += 14;
+  rr(x, y, Math.min(w, 190), 28, 8); ctx.fillStyle = hex(LINE, 0.12); ctx.fill();
+  words('#set page(', x + 14, y + 19, `400 15px ${MONO}`, MUTED);
+  lines(x, y + 58, w, [0.9, 0.74, 0.82], 20, faint, r.y + r.h - 50);
+}
+function shellInsides(r) {
+  const faint = hex(LINE, 0.55);
+  rr(r.x + 12, r.y + 14, 64, 24, 12); ctx.strokeStyle = SAGE; ctx.lineWidth = 1.6; ctx.stroke();
+  hair(r.x + 24, r.y + 21, r.x + 30, r.y + 26, SAGE); hair(r.x + 30, r.y + 26, r.x + 24, r.y + 31, SAGE); hair(r.x + 38, r.y + 26, r.x + 60, r.y + 26, SAGE);
+  rr(r.x + 84, r.y + 14, 64, 24, 12); ctx.strokeStyle = hex(LINE, 0.6); ctx.stroke(); ring(r.x + 166, r.y + 26, 11, hex(LINE, 0.6));
+  const rows = [['>', 0.3], ['', 0.4, 0.62, 0.8], ['', 0.3, 0.5, 0.7], ['', 0.24], ['>', 0.36], ['', 0.6], ['', 0.5], ['>', 0.2]];
+  rows.forEach((row, i) => {
+    const y = r.y + 66 + i * 28;
+    if (y > r.y + r.h - 50) return;
+    if (row[0]) { hair(r.x + 16, y - 5, r.x + 21, y, SAGE); hair(r.x + 21, y, r.x + 16, y + 5, SAGE); }
+    const x0 = r.x + (row[0] ? 32 : 16);
+    hair(x0, y, x0 + (r.w - 48) * row[1], y, faint);
+    if (row[2]) hair(x0 + (r.w - 48) * (row[1] + 0.06), y, x0 + (r.w - 48) * row[2], y, faint);
+  });
+}
+function outlineInsides(r) {
+  hair(r.x + r.w / 2 - 28, r.y + 22, r.x + r.w / 2 + 28, r.y + 22, hex(LINE, 0.6), 2);
+  const rows = [0, 1, 2, 3, 4, -1, 5, 6, 7];
+  let y = r.y + 46;
+  for (const i of rows) {
+    if (y > r.y + r.h - 64) break;
+    if (i < 0) { hair(r.x + r.w / 2 - 28, y + 10, r.x + r.w / 2 + 28, y + 10, hex(LINE, 0.5)); y += 26; continue; }
+    rr(r.x + 22, y, 30, 22, 6); ctx.strokeStyle = i === 3 ? MAUVE : hex(LINE, 0.75); ctx.lineWidth = 1.6; ctx.stroke();
+    hair(r.x + 62, y + 11, r.x + 62 + [22, 16, 30, 18, 26, 14, 24, 20][i], y + 11, hex(LINE, 0.6));
+    y += 34;
+  }
+}
+function agentInsides(r) {
+  const faint = hex(LINE, 0.55), x = r.x + 16, w = r.w - 32;
+  rr(x, r.y + 14, Math.min(w * 0.62, 300), 36, 8); ctx.strokeStyle = hex(LINE, 0.8); ctx.lineWidth = 1.6; ctx.stroke();
+  asterisk(x + 22, r.y + 32, 8, CLAUDE); hair(x + 42, r.y + 32, x + Math.min(w * 0.62, 300) * 0.8, r.y + 32, hex(LINE, 0.6));
+  hair(x + 2, r.y + 72, x + 7, r.y + 77, MUTED); hair(x + 7, r.y + 77, x + 2, r.y + 82, MUTED); hair(x + 20, r.y + 77, x + w * 0.5, r.y + 77, faint);
+  dot(x + 4, r.y + 110, 3.5, INK); hair(x + 20, r.y + 110, x + w * 0.8, r.y + 110, faint); hair(x + 20, r.y + 130, x + w * 0.6, r.y + 130, faint);
+  dot(x + 4, r.y + 166, 3.5, INK); hair(x + 20, r.y + 166, x + w * 0.4, r.y + 166, faint);
+  hair(x + 20, r.y + 180, x + 20, r.y + 188, faint); hair(x + 20, r.y + 188, x + 28, r.y + 188, faint); hair(x + 36, r.y + 188, x + w * 0.56, r.y + 188, faint);
+  const d = { x: x + 4, y: r.y + 214, w: w - 8, h: 92 };
+  rr(d.x, d.y, d.w, d.h, 8); ctx.strokeStyle = CLAUDE; ctx.lineWidth = 1.6; ctx.stroke();
+  hair(d.x + 14, d.y + 22, d.x + d.w * 0.6, d.y + 22, faint);
+  hair(d.x + 14, d.y + 48, d.x + 26, d.y + 48, '#B0505F'); hair(d.x + 36, d.y + 48, d.x + d.w * 0.4, d.y + 48, hex('#B0505F', 0.7));
+  hair(d.x + 14, d.y + 70, d.x + 26, d.y + 70, SAGE); hair(d.x + 36, d.y + 70, d.x + d.w * 0.34, d.y + 70, hex(SAGE, 0.8));
+  const p = { x: x, y: r.y + r.h - 50, w: w, h: 34 };
+  rr(p.x, p.y, p.w, p.h, 8); ctx.strokeStyle = hex(LINE, 0.8); ctx.lineWidth = 1.6; ctx.stroke();
+  hair(p.x + 12, p.y + 12, p.x + 17, p.y + 17, MUTED); hair(p.x + 17, p.y + 17, p.x + 12, p.y + 22, MUTED);
+}
+
+// A seam: a line down the margin, a knob halfway with the thing it brings
+// in, lit under the pointer.
+function seam(x, color, kind, lit) {
+  hair(x, TOPY + 30, x, FOOT - 30, hex(color, 0.55 + 0.45 * lit), 1.8);
+  const r = 13 + 3 * lit;
+  dot(x, KNOB_Y, r, SHEET); dot(x, KNOB_Y, r, hex(color, 0.08 + 0.2 * lit)); ring(x, KNOB_Y, r, color, 1.8);
+  if (kind === 'outline') { for (const k of [-4, 0, 4]) hair(x - 5, KNOB_Y + k, x + 5, KNOB_Y + k, color, 1.6); }
+  else { hair(x - 5, KNOB_Y - 4, x - 1, KNOB_Y, color); hair(x - 1, KNOB_Y, x - 5, KNOB_Y + 4, color); hair(x + 1, KNOB_Y + 5, x + 6, KNOB_Y + 5, color); }
+}
+
+function ide(t, a) {
+  const k = shaped(t);
+  const gone = 1 - clamp01(k * 2.2);         // the IDE's own panes go first
+  ctx.save(); ctx.globalAlpha = a;
+  ideChrome(1 - k);
+  ctx.save(); ctx.globalAlpha *= gone;
+  const drift = (r, dx) => ({ ...r, x: r.x + dx * k * 60 });
+  pane(drift(IDE.activity, -1), GRAY, activityInsides);
+  pane(drift(IDE.browser, -1), OCHRE, browserInsides);
+  pane(drift(IDE.outline, -1), OCHRE, r => strip(r, 'Outline'));
+  pane(drift(IDE.timeline, -1), OCHRE, r => strip(r, 'Timeline'));
+  pane(drift(IDE.code, -0.5), SLATE, codeInsides, 'Code', 0.42);
+  pane(drift(IDE.terminal, -0.5), SAGE, terminalInsides, 'Terminal', 0.62);
+  ctx.restore();
+  ctx.restore();
+}
+
+function emaki(t, a) {
+  const k = shaped(t), come = span(t, T.shape + SHAPED * 0.55, 0.5);
+  const { chat, seamL, seamR } = columns(t);
+  ctx.save(); ctx.globalAlpha = a;
+  emakiChrome(t, k);
+  sidebar(come);
+  // The chat: from the IDE's narrow column at the edge to the middle.
+  const r = t < T.dip && k < 1 ? mixR(IDE.chat, chat, k) : chat;
+  const ag = agent(t);
+  ctx.save(); ctx.globalAlpha *= 1 - ag * 0.85;
+  pane(r, ACCENT, rect => {
+    ctx.save(); ctx.globalAlpha *= clamp01(1 - k * 2.5); ideChatInsides(rect); ctx.restore();
+    ctx.save(); ctx.globalAlpha *= clamp01(k * 2.5 - 1.5); chatInsides(rect); ctx.restore();
+  }, 'Agent Chat', 0.55);
+  ctx.restore();
+  // The seams, the outline's drawer out of the left one.
+  ctx.save(); ctx.globalAlpha *= come;
+  const o = outline(t);
+  if (o > 0.01) {
+    const d = { x: seamL + 6, y: TOPY + 40, w: chat.x - 14 - (seamL + 6), h: FOOT - TOPY - 80 };
+    ctx.save(); ctx.globalAlpha *= clamp01(o * 1.6); pane(d, MAUVE, outlineInsides, 'Outline', 0.93); ctx.restore();
+  }
+  const near = x => Math.max(clamp01(1 - Math.hypot(pointer(t).x - x, pointer(t).y - KNOB_Y) / 60), 0);
+  seam(seamL, MAUVE, 'outline', Math.max(o, near(seamL)));
+  seam(seamR, CLAUDE, 'agent', Math.max(ag, near(seamR)));
+  ctx.restore();
+  // The two panels, sliding in from their sides.
+  const f = files(t), fp = file(t), s = shell(t);
+  if (f > 0.001) {
+    const tree = { x: M0 - (1 - f) * 60, y: TOPY, w: PW - 12, h: FOOT - TOPY };
+    ctx.save(); ctx.globalAlpha *= clamp01(f * 1.5);
+    pane(tree, OCHRE, rr2 => filesInsides(rr2, fp), 'Files', 0.93);
+    if (fp > 0.001) {
+      const page = { x: M0 + PW, y: TOPY, w: FW * fp - 12, h: FOOT - TOPY };
+      ctx.save(); ctx.globalAlpha *= clamp01(fp * 1.5); pane(page, OCHRE, fileInsides); ctx.restore();
+    }
+    ctx.restore();
+  }
+  if (s > 0.001) {
+    const term = { x: M1 - TW * s + 12 + (1 - s) * 40, y: TOPY, w: TW - 12, h: FOOT - TOPY };
+    ctx.save(); ctx.globalAlpha *= clamp01(s * 1.5); pane(term, SAGE, shellInsides, 'Terminal', 0.93); ctx.restore();
+  }
+  // The agent CLI over the chat, in its column.
+  if (ag > 0.001) {
+    const c = { x: chat.x - 6, y: TOPY - 4 + (1 - ag) * 16, w: chat.w + 12, h: FOOT - TOPY + 8 };
+    ctx.save(); ctx.globalAlpha *= ag; pane(c, CLAUDE, agentInsides, 'Agent CLI', 0.82); ctx.restore();
+  }
+  ctx.restore();
+}
+
+// The Mac's arrow, black on a white halo.
+function arrow(p, down) {
+  ctx.save(); ctx.translate(p.x - 3, p.y - 3); const k = down ? 2.35 : 2.6; ctx.scale(k, k);
+  ctx.beginPath();
+  ctx.moveTo(1.5, 1.5); ctx.lineTo(1.5, 12.2); ctx.lineTo(4.1, 9.8); ctx.lineTo(6, 14); ctx.lineTo(7.9, 13.2); ctx.lineTo(6.1, 9.1); ctx.lineTo(9.6, 9.1); ctx.closePath();
+  ctx.lineJoin = 'round'; ctx.strokeStyle = '#fff'; ctx.lineWidth = 1.6; ctx.stroke();
+  ctx.fillStyle = '#111'; ctx.fill();
+  ctx.restore();
+}
+
+function key(x, y, sym, color, lit) {
+  const s = 40;
+  rr(x, y, s, s, 8);
+  ctx.fillStyle = SHEET; ctx.fill();
+  ctx.strokeStyle = lit ? color : hex(LINE, 0.9); ctx.lineWidth = lit ? 2 : 1.5; ctx.stroke();
+  ctx.fillStyle = lit ? color : INK; ctx.font = `500 21px ${KEYS}`; ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+  ctx.fillText(sym, x + s / 2, y + s / 2 + 1);
+  ctx.textAlign = 'left'; ctx.textBaseline = 'alphabetic';
+}
+
+// The right column: IDE or ADE, as the window is, then the parts.
+function list(t) {
+  const X = 1340, R = W - 86;
+  const ade = t < T.dip ? shaped(t) : t < T.dip + DIP ? 1 - span(t, T.dip, DIP) : 0;
+  // One goes before the other comes, so the two never stand over each other.
+  for (const [mark, says, color, a] of [['IDE', 'integrated development environment', INK, clamp01(1 - ade * 2)], ['ADE', 'agentic development environment', ACCENT, clamp01(ade * 2 - 1)]]) {
+    ctx.save(); ctx.globalAlpha = a;
+    words(mark, X, 372, `500 32px ${MONO}`, color);
+    words(says, X + 82, 372, `italic 400 28px ${SERIF}`, MUTED);
+    ctx.restore();
+  }
+  hair(X, 412, R, 412, hex(LINE, 0.35), 1.4);
+  const reset = t >= T.dip ? 1 - span(t, T.dip, 0.6) : 1;
+  ROWS.forEach((row, i) => {
+    const lit = t >= row.on[0] && t < row.on[1];
+    const begun = t >= row.on[0];
+    const alpha = lit ? 1 : begun ? 0.36 + 0.36 * reset : 0.36;
+    const y = 482 + i * 118;
+    ctx.save(); ctx.globalAlpha = alpha * clamp01(0.4 + ade);
+    words(row.name, X, y, `400 38px ${SERIF}`, lit ? row.color : INK);
+    row.keys.forEach((s, j) => key(R - (3 - j) * 48 + 8, y - 30, s, row.color, lit));
+    words(row.says, X, y + 42, `italic 400 28px ${SERIF}`, lit ? INK : MUTED);
+    ctx.restore();
+  });
+}
+
+function draw(t) {
+  ctx.setTransform(canvas.width / W, 0, 0, canvas.height / H, 0, 0);
+  ctx.fillStyle = PAPER; ctx.fillRect(0, 0, W, H);
+  header();
+  windowFrame();
+  ctx.save(); rr(WIN.x + 1, WIN.y + 1, WIN.w - 2, WIN.h - 2, WIN.r); ctx.clip();
+  const a = inside(t);
+  if (emakiShown(t)) { ide(t, a); emaki(t, a); }
+  else { ide(0, a); ctx.save(); ctx.globalAlpha = a; pane(IDE.chat, ACCENT, ideChatInsides, 'Agent Chat', 0.55); ctx.restore(); }
+  ctx.restore();
+  list(t);
+  arrow(pointer(t), pressing(t));
+}
+
+window.frame = i => { draw(i / FPS); return canvas.toDataURL('image/png'); };
+window.FRAMES = FPS * LENGTH;
+window.FPS = FPS;
+window.ready.then(() => {
+  // In a browser, the picture plays; the renderer draws frame by frame.
+  if (!navigator.webdriver && !window.RENDERING) {
+    const start = performance.now();
+    const tick = now => { draw(((now - start) / 1000) % LENGTH); requestAnimationFrame(tick); };
+    requestAnimationFrame(tick);
+  }
+});
+</script>
+</body>
+</html>
