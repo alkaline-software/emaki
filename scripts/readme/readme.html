@@ -12,6 +12,7 @@
 <body>
 <canvas id="c" width="1600" height="840"></canvas>
 <script>
+if (window.DARK || new URLSearchParams(location.search).has('dark')) document.body.style.background = '#1A1918';
 // The README's moving picture, drawn as emaki.lol draws Emaki: hairlines on
 // warm paper, each part a pale wash of its color with an edge of it, a
 // serif title and an italic serif line beside a mono one. The site's story,
@@ -24,9 +25,15 @@
 
 const FPS = 30, LENGTH = 15;   // seconds, looped
 const W = 1920, H = 1008;
-const PAPER = '#F3F1EA', SHEET = '#F8F6F0', INK = '#1F1E1D', MUTED = '#77746B', LINE = '#8E8A80';
+// Light by default; the dark appearance (`?dark`, or DARK from the
+// renderer) takes the site's dark values (css/theme.scss, body.quarto-dark):
+// the page and panel for the paper and sheet, and the sketch colors' dark
+// shades, which read on them.
+const DARK = !!window.DARK || new URLSearchParams(location.search).has('dark');
+const PAPER = DARK ? '#1A1918' : '#F3F1EA', SHEET = DARK ? '#222120' : '#F8F6F0', INK = DARK ? '#F3F1EA' : '#1F1E1D', MUTED = DARK ? '#A09D94' : '#77746B', LINE = DARK ? '#8A867D' : '#8E8A80';
 // The site's accent and its sketch colors (css/theme.scss), a part each.
-const ACCENT = '#5061B3', OCHRE = '#9E793D', SLATE = '#4489AE', SAGE = '#578F63', MAUVE = '#986EA2', CLAUDE = '#D97757', GRAY = '#85818F';
+const ACCENT = DARK ? '#94A7ED' : '#5061B3', OCHRE = DARK ? '#DAB883' : '#9E793D', SLATE = DARK ? '#8AC7EA' : '#4489AE', SAGE = DARK ? '#99CDA3' : '#578F63', MAUVE = DARK ? '#D5ADDE' : '#986EA2', CLAUDE = '#D97757', GRAY = DARK ? '#8F8BA0' : '#85818F';
+const RED = DARK ? '#EB8FA6' : '#B0505F';
 const SERIF = '"Source Serif 4", "Source Serif Pro", Georgia, serif';
 const MONO = '"JetBrains Mono", Menlo, monospace';
 const KEYS = 'system-ui, -apple-system, sans-serif';
@@ -249,7 +256,7 @@ function ideChrome(a) {
   // The status bar.
   const y = WIN.y + WIN.h - 20;
   rr(WIN.x + 14, y - 6, 34, 12, 6); ctx.fillStyle = ACCENT; ctx.fill();
-  hair(WIN.x + 62, y, WIN.x + 100, y, hex(LINE, 0.5)); dot(WIN.x + 116, y, 3.5, '#B0505F');
+  hair(WIN.x + 62, y, WIN.x + 100, y, hex(LINE, 0.5)); dot(WIN.x + 116, y, 3.5, RED);
   hair(WIN.x + 128, y, WIN.x + 150, y, hex(LINE, 0.5)); dot(WIN.x + 166, y, 3.5, OCHRE);
   for (const k of [0, 1, 2, 3, 4]) hair(WIN.x + WIN.w - 290 + k * 56, y, WIN.x + WIN.w - 254 + k * 56, y, hex(LINE, 0.4));
   ctx.restore();
@@ -453,7 +460,7 @@ function agentInsides(r) {
   const d = { x: x + 4, y: r.y + 214, w: w - 8, h: 92 };
   rr(d.x, d.y, d.w, d.h, 8); ctx.strokeStyle = CLAUDE; ctx.lineWidth = 1.6; ctx.stroke();
   hair(d.x + 14, d.y + 22, d.x + d.w * 0.6, d.y + 22, faint);
-  hair(d.x + 14, d.y + 48, d.x + 26, d.y + 48, '#B0505F'); hair(d.x + 36, d.y + 48, d.x + d.w * 0.4, d.y + 48, hex('#B0505F', 0.7));
+  hair(d.x + 14, d.y + 48, d.x + 26, d.y + 48, RED); hair(d.x + 36, d.y + 48, d.x + d.w * 0.4, d.y + 48, hex(RED, 0.7));
   hair(d.x + 14, d.y + 70, d.x + 26, d.y + 70, SAGE); hair(d.x + 36, d.y + 70, d.x + d.w * 0.34, d.y + 70, hex(SAGE, 0.8));
   const p = { x: x, y: r.y + r.h - 50, w: w, h: 34 };
   rr(p.x, p.y, p.w, p.h, 8); ctx.strokeStyle = hex(LINE, 0.8); ctx.lineWidth = 1.6; ctx.stroke();

@@ -1,4 +1,4 @@
-<p align="center"><img src=".github/readme.gif" alt="An IDE's window, the agent chat squeezed into a pane at its edge, turns into Emaki's: the chat takes the middle and the sessions sit under their projects in the sidebar. Then the files panel opens with a file drawn as it reads, the terminal opens at the right, the outline slides out of the left margin, and the agent's own CLI takes the chat's place, each named in a list with its keys." width="100%"></p>
+<p align="center"><picture><source media="(prefers-color-scheme: dark)" srcset=".github/readme-dark.gif"><img src=".github/readme.gif" alt="An IDE's window, the agent chat squeezed into a pane at its edge, turns into Emaki's: the chat takes the middle and the sessions sit under their projects in the sidebar. Then the files panel opens with a file drawn as it reads, the terminal opens at the right, the outline slides out of the left margin, and the agent's own CLI takes the chat's place, each named in a list with its keys." width="100%"></picture></p>
 
 # Emaki 絵巻
 

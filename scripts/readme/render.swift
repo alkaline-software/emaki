@@ -7,6 +7,7 @@ import WebKit
 // (`RENDERING`), so every frame is drawn for its own moment. README_ICON
 // names the app's icon, handed to the page as data (`ICON`): drawn from a
 // file it would taint the canvas, and no frame could be read back.
+// README_DARK=1 draws the dark appearance (`DARK`).
 let args = CommandLine.arguments
 let page = URL(fileURLWithPath: args[1])
 let out = URL(fileURLWithPath: args[2])
@@ -19,7 +20,7 @@ final class Renderer: NSObject, WKNavigationDelegate {
         let config = WKWebViewConfiguration()
         let path = ProcessInfo.processInfo.environment["README_ICON"] ?? ""
         let icon = path.isEmpty ? "" : ((try? Data(contentsOf: URL(fileURLWithPath: path)))?.base64EncodedString() ?? "")
-        config.userContentController.addUserScript(WKUserScript(source: "window.RENDERING = true; window.ICON = \(icon.isEmpty ? "''" : "'data:image/png;base64,\(icon)'");", injectionTime: .atDocumentStart, forMainFrameOnly: true))
+        config.userContentController.addUserScript(WKUserScript(source: "window.RENDERING = true; window.DARK = \(ProcessInfo.processInfo.environment["README_DARK"] == "1"); window.ICON = \(icon.isEmpty ? "''" : "'data:image/png;base64,\(icon)'");", injectionTime: .atDocumentStart, forMainFrameOnly: true))
         view = WKWebView(frame: NSRect(x: 0, y: 0, width: 1600, height: 900), configuration: config)
         super.init()
     }

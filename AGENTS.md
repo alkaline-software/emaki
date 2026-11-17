@@ -175,7 +175,7 @@ crates/emaki-app/         the window
   assets/icon/               the icon in every size, drawn by scripts/icon/icon.html
 scripts/make-app.sh        Emaki.app bundle for a quick local run, ad-hoc signed
 scripts/make-icon.sh       remakes assets/icon from scripts/icon/icon.html
-scripts/make-readme-gif.sh .github/readme.gif, the README's picture, from the drawing in scripts/readme/
+scripts/make-readme-gif.sh .github/readme.gif, the README's picture, from the drawing in scripts/readme/ (--dark: .github/readme-dark.gif)
 scripts/release-mac.sh     the signed, notarized, Finder-laid-out disk image
 scripts/dmg/               the disk image's background and the script that draws it
 scripts/splash/            the Windows installer's splash and the script that draws it

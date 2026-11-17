@@ -7,9 +7,15 @@
 #
 #   scripts/make-readme-gif.sh            the GIF
 #   scripts/make-readme-gif.sh <dir> 0 89  those frames as PNGs, to look at
+#   --dark first, for either: the dark appearance, at .github/readme-dark.gif
 set -euo pipefail
 cd "$(dirname "$0")/.."
 OUT=.github/readme.gif
+if [[ ${1:-} == --dark ]]; then
+  shift
+  export README_DARK=1
+  OUT=.github/readme-dark.gif
+fi
 [[ -f scripts/readme/readme.html ]] || { print -u2 "make-readme-gif: no drawing yet: scripts/readme/readme.html (docs/design.md, The README's picture)"; exit 1; }
 export README_ICON=$PWD/crates/emaki-app/assets/icon/icon-256.png
 TMP=$(mktemp -d)
