@@ -2,6 +2,18 @@
 
 Each release has a section here, and `release.yml` puts that section on the GitHub Release as its notes. Write it for the person installing the app, as a numbered list: a topic in bold, then one sentence on what changed for them, with small fixes gathered under **Fixes**. Ten items at most. The reasoning belongs in AGENTS.md and `docs/`.
 
+## v0.5.5
+
+1. **Sidebar**: New Session, All Sessions and Agents share one line, and your projects are one list with the pinned ones first, moving into place when pinned or let go.
+2. **Put away**: Archived, Temporary, Hidden and Trash are a line of buttons at the foot of the projects, each opening its list over the line.
+3. **Collapse all**: A button beside the computer's name folds every open project, and what is open or shut stays so after a relaunch.
+4. **Tooltips**: Buttons in the sidebar name themselves and their shortcuts on hover again.
+5. **Click to the letter**: A click on a rendered block in a markdown file puts the caret on the letter clicked and keeps the page where it was.
+6. **Column colors**: The files tree, the file and the conversation each stand on a ground of their own, a step apart, in light and dark.
+7. **Lists**: A second Return on an empty list item, or Return then Backspace, moves it out a level on the same line, with the caret where the text will go.
+8. **Quarto attributes**: A long list of a block's attributes shows a short form and opens in full on a click.
+9. **Fixes**: The editor no longer crashes when typing at the end of a wrapped line, ⌘B with nothing selected toggles the sidebar instead of adding marks, a wrapped address in inline code stays inside its plate, HTML blocks have room inside their box, and a second click on a sticky folder closes it.
+
 ## v0.5.4
 
 1. **Typst and LaTeX**: A `.typ` or `.tex` file, and a Quarto file's Typst or LaTeX blocks, read in the rendered editor as markdown does, their code folded into a quiet row that opens on a click and folds back with Esc.
