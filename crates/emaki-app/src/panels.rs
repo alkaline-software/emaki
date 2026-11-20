@@ -10073,7 +10073,7 @@ impl Workbench {
             .w(w)
             .h_full()
             .flex_shrink_0()
-            .bg(theme.background)
+            .bg(crate::look::file_ground(&theme))
             // Its edge by the conversation's.
             .map(|d| if self.files_right() { d.border_l_1() } else { d.border_r_1() })
             .border_color(theme.border)

@@ -280,8 +280,9 @@ impl TextHits {
         self.0.now.borrow_mut().push((bounds, layout, text));
     }
 
+    /// The frame's runs become the last frame's, and the list they were
+    /// in is the next frame's to fill, its room kept.
     pub(crate) fn end_frame(&self) {
-        let now = std::mem::take(&mut *self.0.now.borrow_mut());
-        *self.0.last.borrow_mut() = now;
+        std::mem::swap(&mut *self.0.now.borrow_mut(), &mut *self.0.last.borrow_mut());
     }
 }

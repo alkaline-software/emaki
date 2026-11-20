@@ -12326,6 +12326,10 @@ impl Workbench {
         // The pinned projects first, in their own order, with a line
         // under them; then the rest, as the index has them.
         let names: Vec<String> = folders.iter().map(|(p, _)| p.clone()).collect();
+        // Whether Collapse All Projects has anything to fold: one of the
+        // computer's own rows open, asked of its rows, not of every
+        // session (`folders_open_here`, at the press).
+        let any_open = names.iter().any(|p| self.folder_open(p));
         // A project every session of which was run in a temporary
         // folder: a scratch run, with a folder nobody can go back to.
         let temp: HashSet<String> = folders.iter().filter(|(p, list)| !is_archived_entry(p) && is_temp_list(list)).map(|(p, _)| p.clone()).collect();
@@ -13111,7 +13115,7 @@ impl Workbench {
             Some(id) => self.side_unlinked(id, &theme, cx),
             None => folders_card,
         };
-        let folders_card = self.side_stack(folders_card, &places, place.as_deref(), linked, card_bg, &theme, cx);
+        let folders_card = self.side_stack(folders_card, &places, place.as_deref(), linked, any_open, card_bg, &theme, cx);
         if projects_only {
             return v_flex().size_full().text_color(theme.sidebar_foreground).child(folders_card).into_any_element();
         }
@@ -13411,7 +13415,7 @@ impl Workbench {
     /// the number of the last change: taken off when the fade is over, it
     /// made all inside a new element whose own animations played again.
     #[allow(clippy::too_many_arguments)]
-    fn side_stack(&self, content: Div, places: &[(Option<String>, String)], place: Option<&str>, linked: bool, card_bg: Hsla, theme: &gpui_component::Theme, cx: &mut Context<Self>) -> AnyElement {
+    fn side_stack(&self, content: Div, places: &[(Option<String>, String)], place: Option<&str>, linked: bool, any_open: bool, card_bg: Hsla, theme: &gpui_component::Theme, cx: &mut Context<Self>) -> AnyElement {
         use emaki_core::remote::LinkState;
         let at = places.iter().position(|(p, _)| p.as_deref() == place).unwrap_or(0);
         let moving = self.side_place_moved.filter(|(from, to, when)| *to == at && *from != at && *from < places.len() && when.elapsed() < FOLD_ANIM).map(|(from, _, _)| from);
@@ -13489,7 +13493,7 @@ impl Workbench {
             // Collapse All Projects, at the band's right end, while the
             // computer's projects show; pale with none open.
             .when(linked, |d| {
-                let any = !self.folders_open_here(place).is_empty();
+                let any = any_open;
                 d.child(
                     div()
                         .id("side-collapse-all")

@@ -35,6 +35,22 @@ About keeping Emaki fast and light: how an optimization pass is done, the rules 
 
 Newest first. Each entry: the version and date, the commit range covered, what was looked at, what was found and done with numbers, and what was left for later.
 
+### v0.5.5, 2026-11-21
+
+Covers `v0.5.4..` the commit that adds this entry: the editor's crash fixes and the v0.5.4 reports, a click on a rendered block landing on the letter clicked, and the sidebar reworked (one list of projects, the line of what is put away, Collapse All Projects, open folders kept past a launch, tooltips in kept views). The last entry's range ends at `a068b41`; `81a4bc9` (v0.5.4) and the README's pictures after it change no code. A debug build, a probe copy (`docs/probing.md`) of 2,040 sessions in 60 projects, four open and two pinned; counts from a stopwatch in the copy or a throwaway test, the settled draws of one run, taken out when done. The same probe copy and a scratch project in `/private/tmp` checked the Collapse All button with folders open and shut, and a click on a rendered block landing on its letter.
+
+| | Before | This pass |
+|---|---|---|
+| The sidebar drawn, 2,040 sessions | 5.0 ms, of it 1.4 ms for whether Collapse All has anything to fold: a set of every session's project, a string each | 3.55 ms: the computer's own rows asked whether one is open |
+| Inline code's font features, a code span a layout | made anew, 80 to 105 ns | shared, 5 ns |
+| Where a rendered block's words were painted, each frame | the list given up and grown again | its room kept from frame to frame |
+
+Measured and left as they are: the folders a live session opens (`sync_folders`), 70 to 120 µs a draw of the window with these sessions, none live; the pin moves, a list of the projects' names and their heights kept at each draw of the sidebar, a few dozen short strings; the editor's way from a click to its letter, which runs at the click alone. Not measured: the hitbox each tooltip's trigger lays (UPSTREAM 84), one a trigger a frame, a few dozen in the window.
+
+Left for later:
+- From the last pass, still open: the picture paths of a markdown file parsed at every key (`pictures_from`); a Quarto file's includes read from disk at every key (`quarto::expand`); the rendered editor drawn afresh at every frame, and the structure's heads hashed (`file_heads_now`); a change of width laying every line out again, and `piece_h` keeping a height for every key a piece has had; the file's spelling sync walking the whole text at each draw while it is unchanged.
+- `sync_folders` asks every session whether it is live at every draw of the window: answered from the hub's word when a session's state changes, it would be nothing between.
+
 ### v0.5.4, 2026-11-13
 
 Covers `c781dcb..` the commit that adds this entry: links and carets in the live editor, the folders held at the top of the tree, blank lines, and LaTeX and Typst read lightly in the rendered editor with their code folded. Counts from a stopwatch in a throwaway test (debug), the second of two runs, on a Typst file of 900 lines and a text of 240 KB, taken out when done; a probe copy on a scratch project in `/private/tmp` (`docs/probing.md`) checked a `.typ` file typed in, a markdown file's spelling marks and blank lines, and the composer's marks for text set from outside.

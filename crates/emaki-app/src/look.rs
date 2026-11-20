@@ -77,11 +77,21 @@ pub fn on_frame() -> (&'static str, &'static str) {
     (a.dark[0], ON_DARK)
 }
 
-/// The files panel's ground, which the structure at its foot shares: a
-/// step darker than the page the file and the conversation stand on, in
-/// both appearances, as VS Code's explorer is darker than its editor.
+/// The files panel's ground, which the structure at its foot shares:
+/// the deepest of the three columns beside the sidebar, in both
+/// appearances, as VS Code's explorer is darker than its editor. The
+/// file's pane is a step lighter (`file_ground`) and the conversation's
+/// page a step lighter again, in even steps.
 pub fn files_ground(theme: &Theme) -> gpui::Hsla {
-    let hex = if theme.mode.is_dark() { 0x171615 } else { 0xf5f4f2 };
+    let hex = if theme.mode.is_dark() { 0x171615 } else { 0xf1f0ed };
+    gpui::rgb(hex).into()
+}
+
+/// The file's pane's ground: between the files panel's and the page the
+/// conversation stands on, so the file reads as a sheet of its own beside
+/// the conversation with no line needed between them.
+pub fn file_ground(theme: &Theme) -> gpui::Hsla {
+    let hex = if theme.mode.is_dark() { 0x1b1a19 } else { 0xf7f6f3 };
     gpui::rgb(hex).into()
 }
 

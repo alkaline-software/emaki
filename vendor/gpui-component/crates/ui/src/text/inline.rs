@@ -22,6 +22,11 @@ use crate::{
     text::text_view::{LinkClickHandlerFn, handle_link_click},
 };
 
+/// Inline code's font features, made once: no contextual forms or
+/// ligatures (Emaki addition, `request_layout`).
+static NO_LIGATURES: std::sync::LazyLock<gpui::FontFeatures> =
+    std::sync::LazyLock::new(|| gpui::FontFeatures(std::sync::Arc::new(vec![("calt".into(), 0), ("clig".into(), 0), ("liga".into(), 0)])));
+
 /// A inline element used to render a inline text and support selectable.
 ///
 /// All text in TextView (including the CodeBlock) used this for text rendering.
@@ -577,7 +582,7 @@ impl Element for Inline {
                     // wrapped after, so the slashes of a "://" broken
                     // after its colon kept the form that tucks under the
                     // colon and stood out past the margin. (Emaki addition.)
-                    run_style.font_features = gpui::FontFeatures(std::sync::Arc::new(vec![("calt".into(), 0), ("clig".into(), 0), ("liga".into(), 0)]));
+                    run_style.font_features = NO_LIGATURES.clone();
                 }
             }
             // A formula's room is set in the math face, whose spaces are as
