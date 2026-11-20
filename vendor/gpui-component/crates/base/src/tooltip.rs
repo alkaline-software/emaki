@@ -1,7 +1,7 @@
 use std::{cell::Cell, rc::Rc, time::Duration};
 
 use gpui::{
-    AnyElement, AnyView, App, Bounds, Context, Div, ElementId, InteractiveElement, IntoElement,
+    AnyElement, AnyView, App, Bounds, Context, Div, ElementId, HitboxId, InteractiveElement, IntoElement,
     ParentElement, Pixels, Render, RenderOnce, Role, Stateful, StatefulInteractiveElement, Styled,
     Task, Window, canvas, deferred, div, prelude::FluentBuilder as _, px,
 };
@@ -105,6 +105,13 @@ pub struct TooltipOverlay {
     /// without the pointer leaving it, a sheet closed by a key or a
     /// show landing after its trigger had gone, stayed for good.)
     claimed: Rc<Cell<bool>>,
+    /// The hitbox of the trigger that claimed last (Emaki addition): a
+    /// view the window replays from its cache lays nothing out and so
+    /// claims nothing, but its hitboxes are replayed with their ids, so
+    /// the pointer on this one says the trigger is still there.
+    held: Rc<Cell<Option<HitboxId>>>,
+    /// Where the trigger whose show is waiting stands (Emaki addition).
+    pending: Option<Bounds<Pixels>>,
 }
 
 impl TooltipOverlay {
@@ -120,6 +127,8 @@ impl TooltipOverlay {
             hide_task: None,
             renderer: Rc::new(|view, _, _, _| div().child(view).into_any_element()),
             claimed: Rc::new(Cell::new(false)),
+            held: Rc::new(Cell::new(None)),
+            pending: None,
         }
     }
 
@@ -155,6 +164,7 @@ impl TooltipOverlay {
         }
 
         let epoch = self.next_epoch();
+        self.pending = Some(content.trigger_bounds);
         self.show_task = Some(cx.spawn_in(window, async move |this, cx| {
             cx.background_executor().timer(SHOW_DELAY).await;
             let _ = this.update_in(cx, |this, _, cx| {
@@ -167,6 +177,19 @@ impl TooltipOverlay {
                 }
             });
         }));
+    }
+
+    /// `request_hide`, from the trigger at `from` as the pointer leaves
+    /// it (Emaki addition): nothing, when another trigger's tooltip shows
+    /// or waits. The pointer carried in one move from a trigger in one
+    /// view onto one in another is heard entering the second before it
+    /// is heard leaving the first, and the leaving hid the new tooltip.
+    pub fn request_hide_from(&mut self, from: Bounds<Pixels>, window: &mut Window, cx: &mut Context<Self>) {
+        let showing = self.content.as_ref().map(|content| content.trigger_bounds);
+        if showing.is_some_and(|b| b != from) || (showing.is_none() && self.pending.is_some_and(|b| b != from)) {
+            return;
+        }
+        self.request_hide(window, cx);
     }
 
     pub fn request_hide(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -193,6 +216,13 @@ impl TooltipOverlay {
     /// tooltip showing still has something to belong to.
     pub fn claim(&self) {
         self.claimed.set(true);
+    }
+
+    /// `claim`, by a trigger with a hitbox of its own, which keeps the
+    /// tooltip in the frames its view is replayed from the cache.
+    pub fn claim_by(&self, hitbox: HitboxId) {
+        self.claimed.set(true);
+        self.held.set(Some(hitbox));
     }
 
     pub fn hide(&mut self, cx: &mut Context<Self>) {
@@ -239,12 +269,15 @@ impl Render for TooltipOverlay {
         // Deferred, this is prepainted after every trigger in the window:
         // with none under the pointer drawn this frame, and no hide
         // already on its way, the tooltip has lost its trigger and goes.
+        // A trigger in a view replayed from the window's cache is not
+        // laid out and claims nothing; the pointer on the hitbox that
+        // claimed last, which the replay keeps, says it is still there.
         self.claimed.set(false);
-        let claimed = self.claimed.clone();
+        let (claimed, held) = (self.claimed.clone(), self.held.clone());
         let this = cx.entity().downgrade();
         let orphan = canvas(
-            move |_, _, cx| {
-                if !claimed.get() {
+            move |_, window, cx| {
+                if !claimed.get() && !held.get().is_some_and(|id| id.is_hovered(window)) {
                     let this = this.clone();
                     cx.defer(move |cx| {
                         let _ = this.update(cx, |o, cx| {

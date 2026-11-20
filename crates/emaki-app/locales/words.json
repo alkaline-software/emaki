@@ -413,6 +413,15 @@
     "de": "Automatische Großschreibung",
     "es": "Mayúsculas automáticas"
   },
+  "Collapse All Projects": {
+    "zh-Hans": "折叠所有项目",
+    "zh-Hant": "收合所有專案",
+    "ja": "すべてのプロジェクトを折りたたむ",
+    "ko": "모든 프로젝트 접기",
+    "fr": "Replier tous les projets",
+    "de": "Alle Projekte einklappen",
+    "es": "Contraer todos los proyectos"
+  },
   "Live markdown": {
     "zh-Hans": "实时 Markdown",
     "zh-Hant": "即時 Markdown",
@@ -1816,15 +1825,6 @@
     "fr": "Fichier",
     "de": "Ablage",
     "es": "Archivo"
-  },
-  "Pinned": {
-    "zh-Hans": "已置顶",
-    "zh-Hant": "已釘選",
-    "ja": "ピン留め",
-    "ko": "고정됨",
-    "fr": "Épinglés",
-    "de": "Angeheftet",
-    "es": "Fijados"
   },
   "Raw editor": {
     "zh-Hans": "原始编辑器",

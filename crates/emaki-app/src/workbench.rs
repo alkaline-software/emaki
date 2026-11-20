@@ -813,9 +813,10 @@ struct TabView {
 pub enum Pane {
     /// The sidebar: the projects' card is what scrolls there.
     Sidebar,
-    /// The pinned projects over the rest, when they have more than shows:
-    /// a list of their own, which a flick in the rest never moves.
-    Pins,
+    /// What a section put away holds, over the line of their buttons at
+    /// the sidebar card's foot, when it has more than shows: a list of
+    /// its own, which a flick in the projects never moves.
+    Shelf,
     Content,
     /// The two panels beside a conversation.
     Files,
@@ -948,37 +949,18 @@ const FIND_BAR_MOST: f32 = 64.;
 /// The height of a hairline between the sidebar's blocks, with its air.
 const SIDE_RULE_H: Pixels = px(9.);
 
-/// A hairline between the sidebar's blocks: under the pinned projects,
-/// over Archived, Temporary and Hidden, and over the Trash.
+/// A hairline over what a section put away holds, at the top of its
+/// rows over the line of its buttons.
 fn side_rule(theme: &gpui_component::Theme) -> Div {
     div().h(SIDE_RULE_H).flex_shrink_0().flex().items_center().px(px(10.)).child(div().h(px(1.)).w_full().bg(theme.sidebar_border))
 }
 
-/// A section's head in the sidebar's card: its icon, its name, how many
-/// it holds and the chevron that folds it. The Pinned and the Projects
-/// sections are the card's own and stand out: their icon on a tile of
-/// the accent, their name in the ink. Archived, Temporary, Hidden and
-/// the Trash are where what is put away goes, and are quiet: the icon
-/// and the name muted, smaller. The icon stands in the folder icon's
-/// column, so a head's name starts where a project's does.
-fn section_head(theme: &gpui_component::Theme, id: &'static str, icon: &'static str, label: &str, count: usize, open: bool, primary: bool) -> Stateful<Div> {
-    let mark = Icon::default().path(icon).with_size(px(if primary { 12.5 } else { 13. })).text_color(if primary { theme.primary } else { theme.muted_foreground });
-    let mark = if primary { div().size(px(20.)).rounded(px(6.)).bg(theme.primary.opacity(0.18)).flex().items_center().justify_center().child(mark) } else { div().flex().justify_center().child(mark) };
-    h_flex()
-        .id(id)
-        .h(SIDE_ROW_H)
-        .px(px(10.))
-        .gap(px(10.))
-        .flex_shrink_0()
-        .items_center()
-        .cursor_pointer()
-        .relative()
-        .group("side-row")
-        .child(crate::look::row_plate(8., (false, false)).group_hover("side-row", |s| s.bg(theme.sidebar_accent.opacity(0.6))))
-        .child(div().w(px(22.)).flex_shrink_0().flex().justify_center().child(mark))
-        .child(div().flex_1().min_w_0().truncate().font_weight(FontWeight::SEMIBOLD).text_size(px(if primary { 12. } else { 11. })).text_color(if primary { theme.sidebar_foreground } else { theme.muted_foreground }).child(t(label).to_string()))
-        .child(div().text_size(px(11.)).text_color(theme.muted_foreground).child(count.to_string()))
-        .child(Icon::new(if open { IconName::ChevronDown } else { IconName::ChevronRight }).with_size(px(12.)).text_color(theme.muted_foreground))
+/// Which of the sidebar card's two scrollers a row is drawn in: the
+/// projects, or what a section put away holds, at the card's foot.
+#[derive(Clone, Copy, PartialEq)]
+enum SideList {
+    Rest,
+    Shelf,
 }
 
 /// The mark of another computer, wherever one is named: a desktop with
@@ -1007,6 +989,33 @@ pub(crate) struct FoldDraw {
     moving: bool,
     serial: u32,
     h: Rc<std::cell::Cell<f32>>,
+}
+
+/// A set's members in order, as `ui.json` keeps them.
+fn sorted(set: &HashSet<String>) -> Vec<String> {
+    let mut v: Vec<String> = set.iter().cloned().collect();
+    v.sort();
+    v
+}
+
+/// A project pinned or let go: the project, where it stood in the list
+/// before and the one it stood over there (none when it was last), how
+/// tall it stood, when it moved and the move's number.
+struct PinMove {
+    project: String,
+    from: usize,
+    before: Option<String>,
+    h: f32,
+    at: Instant,
+    serial: u64,
+}
+
+/// The room a project pinned or let go left in the list, closing.
+fn pin_gap(h: f32, serial: u64) -> AnyElement {
+    div()
+        .flex_shrink_0()
+        .with_animation(ElementId::Name(format!("pin-gap-{serial}").into()), Animation::new(FOLDER_ANIM).with_easing(ease_out_quint()), move |d, t| d.h(px(h * (1. - t))))
+        .into_any_element()
 }
 
 /// A session's row in the sidebar, as much of it as is drawn once it
@@ -1043,6 +1052,25 @@ const PLAN_BOX_H: Pixels = px(360.);
 /// The name a session begun from a folder's plus goes by until it has
 /// one of its own.
 const NEW_TITLE: &str = phrase("New Session");
+
+/// The height of the sidebar's line of New Session, All Sessions and
+/// Agents, and the side of its two square buttons.
+const NAV_H: f32 = 34.;
+
+/// The sidebar's one measure of air: between its blocks (the line of
+/// entries, the cards) and between them and its edges.
+const SIDE_GUTTER: f32 = 8.;
+
+/// The air inside the Projects card, all round: between its edge and the
+/// rows, and the line of what is put away, at its foot.
+const SIDE_INSET: f32 = 4.;
+
+/// The height of the buttons on the line of what is put away.
+const SHELF_H: f32 = 30.;
+
+/// The most of the Projects card what a section put away shows of
+/// itself takes, over the line of their buttons.
+const SHELF_MOST: f32 = 0.34;
 
 /// The round a message sent from here stands in until the transcript has
 /// it, by its `uuid`. No row has this one.
@@ -1539,7 +1567,8 @@ pub struct Workbench {
     /// person opens or closes one (`folder_open`).
     folders_open: Option<HashSet<String>>,
     /// The folders with a live session as of the last draw, and those
-    /// opened for that reason and not touched since (`sync_folders`).
+    /// opened for that reason and not touched since (`sync_folders`),
+    /// both kept past a launch.
     folders_live: HashSet<String>,
     folders_auto: HashSet<String>,
     /// The right-click menu showing, if one is.
@@ -1660,10 +1689,11 @@ pub struct Workbench {
     /// stood when that last changed, when, and how many changes
     /// (`sign_fold`).
     pub(crate) sign_folds: std::cell::RefCell<HashMap<String, (bool, f32, Instant, u32)>>,
-    /// The folder last opened or closed: which, whether it was opened,
-    /// when, and the click's number, for the moment its sessions take to
-    /// unfold or fold away.
-    folder_anim: Option<(String, bool, std::time::Instant, u32)>,
+    /// The folders just opened or closed: whether each was opened, when,
+    /// and the change's number, for the moment its sessions take to
+    /// unfold or fold away. Several close at once with Collapse All.
+    folder_anim: HashMap<String, (bool, std::time::Instant, u32)>,
+    folder_serial: u32,
     /// Whose words the one textarea holds now.
     draft_of: Option<String>,
     /// An attachment opened large over the window.
@@ -2047,8 +2077,9 @@ pub struct Workbench {
     inner_kept: std::cell::RefCell<HashMap<SharedString, KeptScroll>>,
     /// The scroll positions momentum may be forwarded to.
     side_scroll: ScrollHandle,
-    /// The pinned projects' own scroller, over the rest (`Pane::Pins`).
-    pin_scroll: ScrollHandle,
+    /// The shelf's at the card's foot: Archived, Temporary, Hidden and
+    /// the Trash (`Pane::Shelf`).
+    shelf_scroll: ScrollHandle,
     sessions_scroll: ScrollHandle,
     home_scroll: ScrollHandle,
     /// The handscroll over the greeting, as it answers the pointer.
@@ -2132,10 +2163,6 @@ pub struct Workbench {
     /// foot, and whether that section shows them.
     hidden: Vec<String>,
     hidden_open: bool,
-    /// Whether the Pinned and the Projects sections are folded to their
-    /// heads. Kept in `ui.json`, as the pins are.
-    pins_shut: bool,
-    projects_shut: bool,
     /// The sessions' folders that are gone, and where each may be now,
     /// as the scanner last looked (`moves::survey`).
     folders: emaki_core::moves::Survey,
@@ -2154,6 +2181,15 @@ pub struct Workbench {
     /// Rows a project comes back with: its move was taken back. Each
     /// grows in where the index puts it (`fold_row`), until its time is up.
     arriving: Vec<(String, Instant, u64)>,
+    /// Projects just pinned or let go (`toggle_pin`): each grows in at
+    /// its new place while the room it left closes, so the rows between
+    /// slide and nothing jumps.
+    pin_moves: Vec<PinMove>,
+    /// The projects' list as last drawn, in its order, and how tall each
+    /// project stood with its sessions: where a project moved from, and
+    /// how much room it left there.
+    side_main: std::cell::RefCell<Vec<String>>,
+    side_tall: std::cell::RefCell<HashMap<String, f32>>,
     /// Whether "Archived" shows its projects. Shut at every launch, as
     /// the sections under it are.
     archived_open: bool,
@@ -2180,13 +2216,13 @@ pub struct Workbench {
     /// The sessions chosen together there, by their keys, of any
     /// projects that are open; the one a range is taken from; the
     /// sessions as last drawn, in their order; and where each one's row
-    /// was, and whether in a pinned project. Projects are chosen or
+    /// was, and in which of the card's scrollers. Projects are chosen or
     /// sessions are, never both: what was touched first says which, and
     /// the other kind is left alone until the choosing is let go.
     side_sessions: Vec<String>,
     side_sess_anchor: Option<String>,
     side_sess_drawn: std::cell::RefCell<Vec<String>>,
-    side_sess_at: Rc<std::cell::RefCell<Vec<(String, Bounds<Pixels>, bool)>>>,
+    side_sess_at: Rc<std::cell::RefCell<Vec<(String, Bounds<Pixels>, SideList)>>>,
     /// Which kind the rectangle being dragged takes: sessions when
     /// true, projects when false, not yet known before it reaches a row.
     side_band_kind: Option<bool>,
@@ -2209,7 +2245,7 @@ pub struct Workbench {
     /// with the same release, before or after this is known.
     side_band_at: Option<Instant>,
     side_press_pin: bool,
-    side_rows_at: Rc<std::cell::RefCell<Vec<(String, Bounds<Pixels>, bool)>>>,
+    side_rows_at: Rc<std::cell::RefCell<Vec<(String, Bounds<Pixels>, SideList)>>>,
     side_room: Rc<std::cell::Cell<Bounds<Pixels>>>,
     /// The folders about to be opened, more than `OPEN_MANY` of them,
     /// while the question is up, with its number for the card's motion.
@@ -2217,7 +2253,7 @@ pub struct Workbench {
     /// The pinned project being dragged, drawn dimmed.
     drag_pin: Option<String>,
     /// Small things of the sidebar that are there or are not (the mark
-    /// of a session with a tab, the line under the pinned projects), as
+    /// of a session with a tab, the Hidden button), as
     /// each was last drawn: whether it was there, when that changed and
     /// which change it was.
     presences: std::cell::RefCell<HashMap<String, (bool, Instant, u32)>>,
@@ -4467,9 +4503,10 @@ impl Workbench {
             attachments: Vec::new(),
             drafts: cx.try_global::<KeptDrafts>().map(|kept| kept.0.clone()).unwrap_or_default(),
             folders_open: ui.folders_open.clone().map(|f| f.into_iter().collect()),
-            folder_anim: None,
-            folders_live: HashSet::new(),
-            folders_auto: HashSet::new(),
+            folder_anim: HashMap::new(),
+            folder_serial: 0,
+            folders_live: ui.folders_live.iter().cloned().collect(),
+            folders_auto: ui.folders_auto.iter().cloned().collect(),
             menu: None,
             menu_gone: None,
             pick: None,
@@ -4692,7 +4729,7 @@ impl Workbench {
             scroll_inner: None,
             inner_kept: Default::default(),
             side_scroll: ScrollHandle::new(),
-            pin_scroll: ScrollHandle::new(),
+            shelf_scroll: ScrollHandle::new(),
             sessions_scroll: ScrollHandle::new(),
             home_scroll: ScrollHandle::new(),
             home_fig: Default::default(),
@@ -4967,8 +5004,6 @@ impl Workbench {
             pinned: ui.pinned.clone(),
             hidden: ui.hidden.clone(),
             hidden_open: false,
-            pins_shut: ui.pins_shut,
-            projects_shut: ui.projects_shut,
             folders: Default::default(),
             remote_links: HashMap::new(),
             remote_ever: HashSet::new(),
@@ -4976,6 +5011,9 @@ impl Workbench {
             leaving: Vec::new(),
             leaving_serial: 0,
             arriving: Vec::new(),
+            pin_moves: Vec::new(),
+            side_main: std::cell::RefCell::new(Vec::new()),
+            side_tall: std::cell::RefCell::new(HashMap::new()),
             archived_open: false,
             temp_open: false,
             trash: emaki_core::trash::load(),
@@ -6435,10 +6473,10 @@ impl Workbench {
             Some("projects:hide") => self.projects_do(ProjectsDo::Hide, self.side_marked.clone(), cx),
             Some("projects:show") => self.projects_do(ProjectsDo::Show, self.side_marked.clone(), cx),
             Some("hidden") => self.toggle_section(2, cx),
-            Some("pins") => self.toggle_section(4, cx),
-            Some("rest") => self.toggle_section(5, cx),
             Some("temporary") => self.toggle_section(1, cx),
             Some("archived") => self.toggle_section(0, cx),
+            Some("trash") => self.toggle_section(3, cx),
+            Some("collapseall") => self.collapse_all(cx),
             // A click on a section's heading on the sessions page:
             // `pagesection:<0-3>`, Projects, Archived, Temporary, Trash.
             Some(t) if t.starts_with("pagesection:") => {
@@ -7255,10 +7293,10 @@ impl Workbench {
                 v.sort();
                 v
             }),
+            folders_live: sorted(&self.folders_live),
+            folders_auto: sorted(&self.folders_auto),
             pinned: self.pinned.clone(),
             hidden: self.hidden.clone(),
-            pins_shut: self.pins_shut,
-            projects_shut: self.projects_shut,
         }
         .save();
         self.last_ui_save = std::time::Instant::now();
@@ -10242,9 +10280,9 @@ impl Workbench {
     /// The sidebar's projects, the pinned ones or the rest, under the
     /// pointer; anywhere else in the sidebar is nothing that scrolls.
     fn sidebar_or_still(&self, at: Point<Pixels>) -> Pane {
-        if self.pin_scroll.bounds().contains(&at) {
-            // Pinned ones that all show are nothing to scroll.
-            if self.pin_scroll.max_offset().y > px(0.) { Pane::Pins } else { Pane::Still }
+        if self.shelf_scroll.bounds().contains(&at) {
+            // A section that all shows is nothing to scroll.
+            if self.shelf_scroll.max_offset().y > px(0.) { Pane::Shelf } else { Pane::Still }
         } else if self.side_scroll.bounds().contains(&at) {
             Pane::Sidebar
         } else {
@@ -10432,7 +10470,7 @@ impl Workbench {
         match owner {
             // A handle takes any offset it is given, so each is held to
             // what its list has.
-            Pane::Sidebar | Pane::Pins | Pane::Files | Pane::Outline | Pane::File => {
+            Pane::Sidebar | Pane::Shelf | Pane::Files | Pane::Outline | Pane::File => {
                 // A wheel in the file ends a glide the structure began.
                 if owner == Pane::File {
                     self.file_glide += 1;
@@ -10441,7 +10479,7 @@ impl Workbench {
                     Pane::Files => self.files_scroll.clone(),
                     Pane::File => self.file_scroller(),
                     Pane::Outline => self.outline_scroll.clone(),
-                    Pane::Pins => self.pin_scroll.clone(),
+                    Pane::Shelf => self.shelf_scroll.clone(),
                     _ => self.side_scroll.clone(),
                 };
                 let at = handle.offset() + delta;
@@ -12191,44 +12229,59 @@ impl Workbench {
         // on the traffic lights as they are. No line under it: the
         // content's card is what the sidebar ends against.
         let header = Self::drag_region(h_flex().h(TITLEBAR_H).flex_shrink_0().pt(px(2.) + FRAME).pr(px(16.)).justify_end().items_center().child(brand), cx);
-        let top = v_flex().px(px(10.)).pt(px(8.)).gap(px(2.));
-
+        // New Session, All Sessions and Agents on one line, three buttons
+        // drawn as the card under them is, on its ground with its edge:
+        // New Session takes the room, its plus in the accent; the other
+        // two are square, their names and keys on the hover. The page
+        // that shows is lit.
+        let sessions_active = page == Page::Sessions && scope == Scope::All;
         let new_row = h_flex()
             .id("nav-new")
-            .h(px(36.))
-            .px(px(10.))
-            .gap(px(10.))
+            .flex_1()
+            .min_w_0()
+            .h(px(NAV_H))
+            .pl(px(7.))
+            .pr(px(10.))
+            .gap(px(8.))
+            .rounded(px(9.))
             .cursor_pointer()
-            .relative()
-            .group("nav-row")
-            .child(crate::look::row_plate(8., (false, false)).when(page == Page::New, |d| d.bg(theme.sidebar_accent)).group_hover("nav-row", |s| s.bg(theme.sidebar_accent.opacity(0.6))))
+            .border_1()
+            .border_color(theme.sidebar_border)
+            .bg(if page == Page::New { theme.sidebar_accent } else { card_bg })
+            .hover(|s| s.bg(theme.sidebar_accent))
+            // Under the button: over it, the hover lay on the wordmark.
+            .managed_tooltip_at(Placement::Bottom, |window, cx| crate::workbench::tip(crate::shortcuts::keyed(t("New Session (⌘N)"), "new-session"), window, cx))
             .on_click(cx.listener(|this, _, window, cx| this.new_toggle(window, cx)))
-            .child(div().size(px(22.)).rounded_full().bg(theme.primary).flex().items_center().justify_center().child(Icon::new(IconName::Plus).with_size(px(13.)).text_color(theme.primary_foreground)))
-            .child(div().flex_1().text_size(px(13.5)).font_weight(FontWeight::MEDIUM).child(t(NEW_TITLE)))
-            .child(kbd_hint(&crate::shortcuts::signs("new-session"), &theme));
-
-        let nav = |id: &'static str, icon: Icon, label: &'static str, hint: String, active: bool, cx: &mut Context<Self>, on: Box<dyn Fn(&mut Self, &mut Window, &mut Context<Self>)>| {
+            .child(div().size(px(20.)).flex_shrink_0().rounded_full().bg(theme.primary).flex().items_center().justify_center().child(Icon::new(IconName::Plus).with_size(px(12.)).text_color(theme.primary_foreground)))
+            .child(div().flex_1().min_w_0().truncate().text_size(px(13.)).font_weight(FontWeight::MEDIUM).child(t(NEW_TITLE)))
+            // The keys, while the pill has the room for them.
+            .when(self.sidebar_w >= px(280.), |d| d.child(div().flex_shrink_0().child(kbd_hint(&crate::shortcuts::signs("new-session"), &theme))));
+        let nav = |id: &'static str, icon: &'static str, tip: String, active: bool, cx: &mut Context<Self>, on: Box<dyn Fn(&mut Self, &mut Window, &mut Context<Self>)>| {
             let theme = Self::shell_theme(cx);
-            h_flex()
+            div()
                 .id(id)
-                .h(px(32.))
-                .px(px(10.))
-                .gap(px(10.))
+                .size(px(NAV_H))
+                .flex_shrink_0()
+                .rounded(px(9.))
+                .flex()
+                .items_center()
+                .justify_center()
                 .cursor_pointer()
-                .relative()
-                .group("nav-row")
-                .child(crate::look::row_plate(8., (false, false)).when(active, |d| d.bg(theme.sidebar_accent)).group_hover("nav-row", |s| s.bg(theme.sidebar_accent.opacity(0.6))))
+                .border_1()
+                .border_color(theme.sidebar_border)
+                .bg(if active { theme.sidebar_accent } else { card_bg })
+                .hover(|s| s.bg(theme.sidebar_accent))
+                .managed_tooltip_at(Placement::Bottom, move |window, cx| crate::workbench::tip(tip.clone(), window, cx))
                 .on_click(cx.listener(move |this, _, window, cx| on(this, window, cx)))
-                .child(div().w(px(22.)).flex().justify_center().child(Icon::new(icon).with_size(px(16.)).text_color(if active { theme.foreground } else { theme.muted_foreground })))
-                .child(div().flex_1().min_w_0().truncate().text_size(px(13.5)).child(label))
-                .when(!hint.is_empty(), |d| d.child(kbd_hint(&hint, &theme)))
+                .child(Icon::default().path(icon).with_size(px(16.)).text_color(if active { theme.foreground } else { theme.muted_foreground }))
         };
-
-        let sessions_active = page == Page::Sessions;
-        let top = top
+        let top = h_flex()
+            .px(px(SIDE_GUTTER))
+            .pt(px(SIDE_GUTTER))
+            .gap(px(6.))
             .child(new_row)
-            .child(nav("nav-sessions", Icon::default().path("icons/scroll.svg"), t("All Sessions"), crate::shortcuts::signs("all-sessions"), sessions_active && scope == Scope::All, cx, Box::new(|this, _, cx| this.show_sessions(Scope::All, cx))))
-            .child(nav("nav-agents", Icon::default().path("icons/sparkles.svg"), t("Agents"), crate::shortcuts::signs("agents"), page == Page::Agents, cx, Box::new(|this, _, cx| this.show_agents(None, cx))));
+            .child(nav("nav-sessions", "icons/scroll.svg", crate::shortcuts::keyed(t("All Sessions (⌘L)"), "all-sessions"), sessions_active, cx, Box::new(|this, _, cx| this.show_sessions(Scope::All, cx))))
+            .child(nav("nav-agents", "icons/sparkles.svg", crate::shortcuts::keyed(t("Agents (⌘E)"), "agents"), page == Page::Agents, cx, Box::new(|this, _, cx| this.show_agents(None, cx))));
 
         // The rows sit in a column of their own inside the scroller. As
         // the scroller's children they were flex items of a column too
@@ -12286,25 +12339,20 @@ impl Workbench {
         let temp_from = hidden_from - temp_n;
         let archived_from = temp_from - archived_n;
         let section_of = |at: usize| if at >= hidden_from { Some(2) } else if at >= temp_from { Some(1) } else if at >= archived_from { Some(0) } else { None };
-        let divided = pinned_n > 0 && archived_from > pinned_n;
         self.side_rows_at.borrow_mut().clear();
         self.side_sess_at.borrow_mut().clear();
         self.side_sess_drawn.borrow_mut().clear();
         // Which projects are lit, known before any is drawn, as the
         // files tree has it: rows lit one under another are one block,
         // round at its two ends alone. Two rows are one under another
-        // when they are in the same list (the pinned, the rest, the
-        // hidden) and the upper one's sessions are not showing between.
+        // when they are in the same list (the projects, or a section put
+        // away) and the upper one's sessions are not showing between.
         let lit: Vec<(bool, u8, bool)> = folders
             .iter()
             .enumerate()
             .map(|(at, (p, _))| {
-                let list = match section_of(at) {
-                    Some(section) => 2 + section as u8,
-                    None if at < pinned_n => 0,
-                    None => 1,
-                };
-                let unfolded = self.folder_open(p) || self.folder_anim.as_ref().is_some_and(|(name, _, at, _)| name == p && at.elapsed() < FOLDER_ANIM);
+                let list = section_of(at).map_or(0, |section| 1 + section as u8);
+                let unfolded = self.folder_open(p) || self.folder_anim.get(p).is_some_and(|(_, at, _)| at.elapsed() < FOLDER_ANIM);
                 (self.side_marked.contains(p), list, unfolded)
             })
             .collect();
@@ -12313,66 +12361,51 @@ impl Workbench {
         let section_shown = [0, 1, 2].map(|n| section_open[n] || section_moving[n].is_some());
         let mut section_box = [0, 1, 2].map(|_| v_flex().flex_shrink_0().overflow_hidden());
         let mut section_h = [0f32; 3];
-        // The pinned and the rest of the projects fold to their heads as
-        // the sections at the foot do, and stay folded past a launch.
-        let rest_n = archived_from.saturating_sub(pinned_n);
-        let (pins_open, rest_open) = (!self.pins_shut, !self.projects_shut);
-        let pins_moving = self.presence("side-pins", pins_open, cx);
-        let rest_moving = self.presence("side-rest", rest_open, cx);
-        let (pins_shown, rest_shown) = (pins_open || pins_moving.is_some(), rest_open || rest_moving.is_some());
-        let (mut pins_h, mut rest_h) = (0f32, 0f32);
-        let mut rest_box = v_flex().flex_shrink_0().overflow_hidden();
-        *self.side_drawn.borrow_mut() = folders
-            .iter()
-            .enumerate()
-            .filter(|(at, _)| match section_of(*at) {
-                Some(section) => section_open[section],
-                None if *at < pinned_n => pins_open,
-                None => rest_open,
-            })
-            .map(|(_, (p, _))| p.clone())
-            .collect();
-        let rule = self.presence("pin-rule", divided, cx);
-        // The pinned projects are a block of their own over the rest,
-        // which the rest scrolls under, and the line is its foot.
-        let mut pins = v_flex().flex_shrink_0();
-        let rule_line = |theme: &gpui_component::Theme| {
-            let line = div().flex_shrink_0().overflow_hidden().child(side_rule(theme));
-            match rule {
-                Some((coming, serial)) => line
-                    .with_animation(ElementId::Name(format!("pin-rule-{serial}").into()), Animation::new(FOLD_ANIM).with_easing(ease_out_quint()), move |d, t| {
-                        let t = if coming { t } else { 1. - t };
-                        d.h(SIDE_RULE_H * t).opacity(t)
-                    })
-                    .into_any_element(),
-                None => line.into_any_element(),
-            }
-        };
+        *self.side_drawn.borrow_mut() = folders.iter().enumerate().filter(|(at, _)| section_of(*at).is_none_or(|section| section_open[section])).map(|(_, (p, _))| p.clone()).collect();
+        *self.side_main.borrow_mut() = folders.iter().enumerate().filter(|(at, _)| section_of(*at).is_none()).map(|(_, (p, _))| p.clone()).collect();
+        // A project pinned or let go that stands where it stood (the first
+        // pin, or the first project of the rest pinned) has not moved, and
+        // nothing plays: a row growing in where its room closes shook.
+        let main_now = self.side_main.borrow();
+        let pin_moves: Vec<&PinMove> = self.pin_moves.iter().filter(|m| m.at.elapsed() < FOLDER_ANIM && main_now.iter().position(|q| *q == m.project) != Some(m.from)).collect();
+        drop(main_now);
+        // What is put away, under the projects: a shelf at the card's
+        // foot that does not scroll with them, so it is in view however
+        // many projects there are.
+        let mut shelf = v_flex().flex_shrink_0();
+        // What a section shows of itself over the line is held to a part
+        // of the card, past which it scrolls: its opening and shutting run
+        // to that height, or the most of the motion was out of sight, and
+        // a long section came and went at once.
+        let shelf_most = f32::from(self.side_room.get().size.height) * SHELF_MOST;
+        let shelf_fit = move |h: f32| if shelf_most > 0. { h.min(shelf_most) } else { h };
         for (at, (p, list)) in folders.into_iter().enumerate() {
             let theme = Self::shell_theme(cx);
             let is_pinned = at < pinned_n;
             let section = section_of(at);
-            if section.is_some_and(|section| !section_shown[section]) || (is_pinned && !pins_shown) || (section.is_none() && !is_pinned && !rest_shown) {
+            let list_kind = if section.is_some() { SideList::Shelf } else { SideList::Rest };
+            if section.is_some_and(|section| !section_shown[section]) {
                 continue;
             }
-            // A pinned project's rows go to the block over the rest, the
-            // rest's to the Projects section's block, and a temporary or
-            // hidden one's to its block at the foot: `scroll` is that
+            // The room a project pinned or let go left over this one.
+            if section.is_none() {
+                for m in pin_moves.iter().filter(|m| m.before.as_deref() == Some(p.as_str())) {
+                    scroll = scroll.child(pin_gap(m.h, m.serial));
+                }
+            }
+            // A project put away has its rows drawn in its section's
+            // block over the line at the card's foot: `scroll` is that
             // block until this project is drawn.
-            if is_pinned {
-                std::mem::swap(&mut scroll, &mut pins);
-                pins_h += f32::from(SIDE_ROW_H);
-            } else if let Some(section) = section {
+            if let Some(section) = section {
                 std::mem::swap(&mut scroll, &mut section_box[section]);
                 section_h[section] += f32::from(SIDE_ROW_H);
-            } else {
-                std::mem::swap(&mut scroll, &mut rest_box);
-                rest_h += f32::from(SIDE_ROW_H);
             }
             // The project leaving is drawn as any other, into a box of
             // its own that closes (`close_leaving`).
             let leaving_now = leaving.iter().find(|(q, _, _)| *q == p).map(|(_, _, serial)| (false, *serial));
             let leaving_now = leaving_now.or_else(|| self.arriving.iter().find(|(q, at, _)| *q == p && at.elapsed() < Duration::from_secs(3)).map(|(_, _, serial)| (true, *serial)));
+            // One just pinned or let go grows in where it now stands.
+            let leaving_now = leaving_now.or_else(|| pin_moves.iter().find(|m| m.project == p && section.is_none()).map(|m| (true, m.serial)));
             let mut leaving_box = v_flex().flex_shrink_0();
             if leaving_now.is_some() {
                 std::mem::swap(&mut scroll, &mut leaving_box);
@@ -12409,7 +12442,8 @@ impl Workbench {
                     // row over it and under it.
                     .relative()
                     .child(crate::look::row_plate(8., (above, below)).map(|d| if marked { d.bg(theme.primary.opacity(0.22)) } else { d.group_hover(group.clone(), |s| s.bg(theme.sidebar_accent.opacity(0.6))) }))
-                    .when(section == Some(1), |d| d.opacity(0.7))
+                    // What is put away is drawn quieter than the projects.
+                    .when(section.is_some(), |d| d.opacity(0.75))
                     .group(group.clone())
                     // ⌘ and a click adds the project to those chosen or
                     // takes it out, ⇧ and a click chooses from the one
@@ -12463,7 +12497,7 @@ impl Workbench {
                     .relative()
                     .child({
                         let (rows, name) = (self.side_rows_at.clone(), p.clone());
-                        canvas(move |bounds, _, _| rows.borrow_mut().push((name, bounds, is_pinned)), |_, _, _, _| {}).absolute().inset_0()
+                        canvas(move |bounds, _, _| rows.borrow_mut().push((name, bounds, list_kind)), |_, _, _, _| {}).absolute().inset_0()
                     })
                     .child(div().w(px(22.)).flex().justify_center().child(Icon::new(if open { IconName::FolderOpen } else { IconName::Folder }).with_size(px(15.)).text_color(tint)))
                     .child(div().flex_1().min_w_0().truncate().text_size(px(13.)).child(self.label(entry_base(&p))))
@@ -12538,19 +12572,16 @@ impl Workbench {
                             }),
                     ),
             );
-            let anim = self.folder_anim.as_ref().filter(|(name, _, at, _)| *name == p && at.elapsed() < FOLDER_ANIM).map(|(_, opening, _, serial)| (*opening, *serial));
+            let anim = self.folder_anim.get(&p).filter(|(_, at, _)| at.elapsed() < FOLDER_ANIM).map(|(opening, _, serial)| (*opening, *serial));
             if !open && anim.is_none() {
                 self.side_prev.borrow_mut().remove(&p);
+                self.side_tall.borrow_mut().insert(p.clone(), f32::from(SIDE_ROW_H));
                 if let Some((coming, serial)) = leaving_now {
                     std::mem::swap(&mut scroll, &mut leaving_box);
                     scroll = scroll.child(fold_row(leaving_box, f32::from(SIDE_ROW_H), coming, serial));
                 }
-                if is_pinned {
-                    std::mem::swap(&mut scroll, &mut pins);
-                } else if let Some(section) = section {
+                if let Some(section) = section {
                     std::mem::swap(&mut scroll, &mut section_box[section]);
-                } else {
-                    std::mem::swap(&mut scroll, &mut rest_box);
                 }
                 continue;
             }
@@ -12637,7 +12668,7 @@ impl Workbench {
                         .gap(px(8.))
                         .cursor_pointer()
                         // Where the row is, for a rectangle dragged over it.
-                        .child(canvas(move |bounds, _, _| at_rows.borrow_mut().push((at_key, bounds, is_pinned)), |_, _, _, _| {}).absolute().inset_0())
+                        .child(canvas(move |bounds, _, _| at_rows.borrow_mut().push((at_key, bounds, list_kind)), |_, _, _, _| {}).absolute().inset_0())
                         // A click opens the session with the caret in
                         // the composer; a second writes its name here.
                         // ⌘ and a click, or ⇧ and one, chooses it with
@@ -12736,69 +12767,42 @@ impl Workbench {
                     .into_any_element(),
                 None => body.into_any_element(),
             });
-            if self.folder_anim.as_ref().is_some_and(|(name, opening, at, _)| *name == p && *opening && at.elapsed() < FOLDER_ANIM + FOOT_STAY) {
-                scroll = scroll.child(follow_foot(if is_pinned { &self.pin_scroll } else { &self.side_scroll }, body_h + f32::from(SIDE_ROW_H)));
+            if self.folder_anim.get(&p).is_some_and(|(opening, at, _)| *opening && at.elapsed() < FOLDER_ANIM + FOOT_STAY) {
+                scroll = scroll.child(follow_foot(
+                    match list_kind {
+                        SideList::Rest => &self.side_scroll,
+                        SideList::Shelf => &self.shelf_scroll,
+                    },
+                    body_h + f32::from(SIDE_ROW_H),
+                ));
             }
             if let Some((coming, serial)) = leaving_now {
                 std::mem::swap(&mut scroll, &mut leaving_box);
                 scroll = scroll.child(fold_row(leaving_box, f32::from(SIDE_ROW_H) + body_h, coming, serial));
             }
-            if is_pinned {
-                pins_h += body_h;
-                std::mem::swap(&mut scroll, &mut pins);
-            } else if let Some(section) = section {
+            self.side_tall.borrow_mut().insert(p.clone(), f32::from(SIDE_ROW_H) + body_h);
+            if let Some(section) = section {
                 section_h[section] += body_h;
                 std::mem::swap(&mut scroll, &mut section_box[section]);
-            } else {
-                rest_h += body_h;
-                std::mem::swap(&mut scroll, &mut rest_box);
             }
         }
-        // A block that folds runs its box from its height to nothing and
-        // back, what is in it fading with it, each fold once.
-        let fold_box = |block: Div, id: &'static str, moving: Option<(bool, u32)>, full: f32| -> AnyElement {
-            match moving {
-                Some((coming, serial)) => block
-                    .with_animation(ElementId::Name(format!("{id}-{serial}").into()), Animation::new(FOLD_ANIM).with_easing(ease_out_quint()), move |d, t| {
-                        let t = if coming { t } else { 1. - t };
-                        d.h(px(full * t)).opacity(t)
-                    })
-                    .into_any_element(),
-                None => block.into_any_element(),
-            }
-        };
-        // "Projects": the projects neither pinned nor put away, under a
-        // head that folds them, at the top of what scrolls.
-        if rest_n > 0 {
-            let theme = Self::shell_theme(cx);
-            scroll = scroll.child(section_head(&theme, "side-rest", "icons/folders.svg", phrase("Projects"), rest_n, rest_open, true).on_click(cx.listener(|this, _, _, cx| if !this.side_banded() { this.toggle_section(5, cx) })));
-            if rest_shown {
-                scroll = scroll.child(fold_box(rest_box, "side-rest", rest_moving, rest_h));
-            }
+        // The room left by one that was last in the list.
+        for m in pin_moves.iter().filter(|m| m.before.is_none()) {
+            scroll = scroll.child(pin_gap(m.h, m.serial));
         }
-        let rule_el = (divided || rule.is_some()).then(|| rule_line(&Self::shell_theme(cx)));
-        // "Archived", "Temporary" and then "Hidden", under the last
-        // project that shows: each a heading with how many there are, and
-        // under it its projects when it is open. All are shut at every
-        // launch.
-        // A hairline sets the block off from the projects over it, and
-        // another the Trash from all above it: the line under the pinned
-        // projects, drawn the same (`side_rule`).
-        let mut first_head = true;
-        let above = archived_from > 0;
-        for (section, (label, id, icon, count), block) in [(phrase("Archived"), "side-archived", "icons/archive.svg", archived_n), (phrase("Temporary"), "side-temp", "icons/hourglass.svg", temp_n), (phrase("Hidden"), "side-hidden", "icons/eye-off.svg", hidden_n)].into_iter().zip(section_box).enumerate().map(|(n, (said, block))| (n, said, block)) {
+        // "Archived", "Temporary" and then "Hidden": what the open one
+        // holds stands over the line of their buttons at the card's foot
+        // (`put_away`), under a hairline that comes and goes with it. All
+        // are shut at every launch.
+        for (section, (id, count), block) in [("side-archived", archived_n), ("side-temp", temp_n), ("side-hidden", hidden_n)].into_iter().zip(section_box).enumerate().map(|(n, (said, block))| (n, said, block)) {
             if count == 0 {
                 continue;
             }
-            let lead = std::mem::replace(&mut first_head, false);
             let theme = Self::shell_theme(cx);
-            if lead && above {
-                scroll = scroll.child(side_rule(&theme));
-            }
-            scroll = scroll.child(section_head(&theme, id, icon, label, count, section_open[section], false).on_click(cx.listener(move |this, _, _, cx| if !this.side_banded() { this.toggle_section(section, cx) })));
             if section_shown[section] {
-                let full = section_h[section];
-                scroll = scroll.child(match section_moving[section] {
+                let full = shelf_fit(section_h[section] + f32::from(SIDE_RULE_H));
+                let block = v_flex().flex_shrink_0().overflow_hidden().child(side_rule(&theme)).child(block);
+                shelf = shelf.child(match section_moving[section] {
                     Some((coming, serial)) => block
                         .with_animation(ElementId::Name(format!("{id}-{serial}").into()), Animation::new(FOLD_ANIM).with_easing(ease_out_quint()), move |d, t| {
                             let t = if coming { t } else { 1. - t };
@@ -12810,35 +12814,16 @@ impl Workbench {
             }
         }
 
-        // "Trash", under everything: the sessions deleted, the last
-        // first, as one list whatever their projects. Each says the days
-        // it has left, and under the pointer Put Back takes their place.
-        // It is shut at every launch, as the two above are.
-        let trash_head = self.presence("side-trash-head", !self.trashed.is_empty(), cx);
-        if !self.trashed.is_empty() || trash_head.is_some() {
+        // "Trash": the sessions deleted, the last first, as one list
+        // whatever their projects. Each says the days it has left, and
+        // under the pointer Put Back takes their place. It is shut at
+        // every launch, as the three beside it are.
+        let trash_open = self.trash_open && !self.trashed.is_empty();
+        {
             let theme = Self::shell_theme(cx);
-            let open = self.trash_open && !self.trashed.is_empty();
+            let open = trash_open;
             let moving = self.presence("side-trash", open, cx);
             let count = self.trashed.len();
-            // Its line comes and goes with it, as one.
-            let lined = above || archived_n + temp_n + hidden_n > 0;
-            let head = section_head(&theme, "side-trash", "icons/trash.svg", phrase("Trash"), count, open, false)
-                .on_click(cx.listener(|this, _, _, cx| if !this.side_banded() { this.toggle_section(3, cx) }))
-                .on_mouse_down(MouseButton::Right, cx.listener(|this, ev: &MouseDownEvent, _, cx| this.trash_menu(None, ev.position, cx)));
-            let head = v_flex().flex_shrink_0().when(lined, |d| d.child(side_rule(&theme))).child(head);
-            let tall = SIDE_ROW_H + if lined { SIDE_RULE_H } else { px(0.) };
-            scroll = scroll.child(match trash_head {
-                Some((coming, serial)) => div()
-                    .flex_shrink_0()
-                    .overflow_hidden()
-                    .child(head)
-                    .with_animation(ElementId::Name(format!("side-trash-head-{serial}").into()), Animation::new(FOLD_ANIM).with_easing(ease_out_quint()), move |d, t| {
-                        let t = if coming { t } else { 1. - t };
-                        d.h(tall * t).opacity(t)
-                    })
-                    .into_any_element(),
-                None => head.into_any_element(),
-            });
             if open || moving.is_some() {
                 // The name no project can have, so the rows' coming and
                 // going is the Trash's own.
@@ -12908,7 +12893,7 @@ impl Workbench {
                         .collect()
                 };
                 let now = emaki_core::trash::now();
-                let mut block = v_flex().flex_shrink_0().overflow_hidden().children(ghosts(None, &theme, cx));
+                let mut block = v_flex().flex_shrink_0().overflow_hidden().child(side_rule(&theme)).children(ghosts(None, &theme, cx));
                 for r in &self.trashed {
                     let row = SideRow { key: key_of(r), title: r.title.clone(), agent: r.agent };
                     let days = self.trash.get(&row.key).map(|e| e.days_left(now)).unwrap_or(emaki_core::trash::KEEP_DAYS as u32);
@@ -12925,8 +12910,8 @@ impl Workbench {
                     });
                     block = block.children(ghosts(Some(row.key.as_str()), &theme, cx));
                 }
-                let full = f32::from(SIDE_SESSION_H) * count as f32;
-                scroll = scroll.child(match moving {
+                let full = shelf_fit(f32::from(SIDE_SESSION_H) * count as f32 + f32::from(SIDE_RULE_H));
+                shelf = shelf.child(match moving {
                     Some((coming, serial)) => block
                         .with_animation(ElementId::Name(format!("side-trash-{serial}").into()), Animation::new(FOLD_ANIM).with_easing(ease_out_quint()), move |d, t| {
                             let t = if coming { t } else { 1. - t };
@@ -12939,6 +12924,9 @@ impl Workbench {
                 self.side_prev.borrow_mut().remove("\u{0}trash");
             }
         }
+        // Whether a section put away shows its rows, or is on its way.
+        let shelf_any = section_shown.iter().any(|s| *s) || self.lingering("side-trash");
+        let put_away = self.put_away([archived_n, temp_n, hidden_n, self.trashed.len()], [section_open[0] && archived_n > 0, section_open[1] && temp_n > 0, section_open[2] && hidden_n > 0, trash_open], cx);
 
         // A newer Emaki waiting: a dot on the gear, seen with the settings
         // shut, as About's in the rail is with them open.
@@ -13094,39 +13082,26 @@ impl Workbench {
                 }))
                 .on_mouse_up(MouseButton::Left, cx.listener(|this, _, _, cx| this.side_band_end(cx)))
                 .on_mouse_up_out(MouseButton::Left, cx.listener(|this, _, _, cx| this.side_band_end(cx)))
-                // The pinned projects stay where they are while the rest
-                // scrolls. They take what they need up to half the card,
-                // and past that scroll by themselves, so the rest always
-                // has the other half.
-                // Their head stands over them and does not scroll; folded,
-                // the block is the head alone.
-                .when(pinned_n > 0, |d| {
-                    let theme = Self::shell_theme(cx);
-                    let head = section_head(&theme, "side-pins", "icons/pin.svg", phrase("Pinned"), pinned_n, pins_open, true).on_click(cx.listener(|this, _, _, cx| if !this.side_banded() { this.toggle_section(4, cx) }));
-                    let pins = pins.overflow_hidden();
-                    d.child(div().flex_shrink_0().px(px(4.)).pt(px(crate::look::ROW_BREATH)).child(head)).when(pins_shown, |d| {
-                        d.child(
-                            v_flex()
-                                .relative()
-                                .flex_shrink_0()
-                                .max_h(gpui::relative(0.5))
-                                .child(v_flex().id("pin-scroll").min_h_0().overflow_y_scroll().track_scroll(&self.pin_scroll).px(px(4.)).child(fold_box(pins, "side-pins", pins_moving, pins_h).into_any_element()))
-                                .vertical_scrollbar(&self.pin_scroll),
-                        )
-                    })
-                })
-                .children(rule_el.map(|line| div().flex_shrink_0().px(px(4.)).child(line)))
                 .child(
-                    // The room under the rows does not scroll, so a row cut
-                    // at the foot stays inside the card's corners.
                     v_flex()
                         .relative()
                         .flex_1()
                         .min_h_0()
-                        .pb(px(4.))
-                        .child(v_flex().id("side-scroll").flex_1().min_h_0().overflow_y_scroll().track_scroll(&self.side_scroll).px(px(4.)).child(scroll.pt(px(crate::look::ROW_BREATH))))
+                        .child(v_flex().id("side-scroll").flex_1().min_h_0().overflow_y_scroll().track_scroll(&self.side_scroll).px(px(SIDE_INSET)).child(scroll.pt(px(SIDE_INSET))))
                         .vertical_scrollbar(&self.side_scroll),
                 )
+                // What the section put away that is open holds, over the
+                // line of their buttons, out of the projects' scroll: up
+                // to a third of the card, past which it scrolls by itself.
+                .when(shelf_any, |d| {
+                    d.child(
+                        v_flex()
+                            .flex_shrink_0()
+                            .max_h(gpui::relative(SHELF_MOST))
+                            .child(v_flex().relative().min_h_0().child(v_flex().id("shelf-scroll").min_h_0().overflow_y_scroll().track_scroll(&self.shelf_scroll).px(px(SIDE_INSET)).child(shelf)).vertical_scrollbar(&self.shelf_scroll)),
+                    )
+                })
+                .child(put_away)
                 .children(band),
         );
 
@@ -13136,7 +13111,7 @@ impl Workbench {
             Some(id) => self.side_unlinked(id, &theme, cx),
             None => folders_card,
         };
-        let folders_card = self.side_stack(folders_card, &places, place.as_deref(), linked, projects_only, card_bg, &theme, cx);
+        let folders_card = self.side_stack(folders_card, &places, place.as_deref(), linked, card_bg, &theme, cx);
         if projects_only {
             return v_flex().size_full().text_color(theme.sidebar_foreground).child(folders_card).into_any_element();
         }
@@ -13153,6 +13128,93 @@ impl Workbench {
             .into_any_element()
     }
 
+    /// The line of what is put away, at the Projects card's foot, as the
+    /// line of entries over the card is: Archived a button that takes the
+    /// room, then Temporary, Hidden while anything is, and the Trash,
+    /// each its icon and how many it holds. A press shows that section's
+    /// rows over the line, one section at a time (`toggle_section`); the
+    /// one showing is lit. One with nothing in it is pale and does
+    /// nothing. `counts` and `open` are Archived, Temporary, Hidden and
+    /// the Trash, in that order.
+    fn put_away(&self, counts: [usize; 4], open: [bool; 4], cx: &mut Context<Self>) -> AnyElement {
+        let theme = Self::shell_theme(cx);
+        let (lit_bg, hover, fg, muted) = (theme.sidebar_accent, theme.sidebar_accent.opacity(0.8), theme.foreground, theme.muted_foreground);
+        let ground = move |lit: bool| if lit { lit_bg } else { lit_bg.opacity(0.45) };
+        let ink = move |lit: bool| if lit { fg } else { muted };
+        let button = move |id: &'static str, section: usize, cx: &mut Context<Self>| {
+            let (n, lit) = (counts[section], open[section]);
+            div()
+                .id(id)
+                .h(px(SHELF_H))
+                .flex_shrink_0()
+                .rounded(px(8.))
+                .flex()
+                .items_center()
+                .bg(ground(lit))
+                .when(n == 0, |d| d.opacity(0.45))
+                .when(n > 0, |d| {
+                    d.cursor_pointer().hover(move |s| s.bg(if lit { lit_bg } else { hover })).on_click(cx.listener(move |this, _, window, cx| {
+                        swallow_click(window, cx);
+                        this.toggle_section(section, cx);
+                    }))
+                })
+        };
+        let count = move |n: usize, lit: bool| div().text_size(px(11.)).text_color(ink(lit)).child(n.to_string());
+        // Archived: its icon in the folders' column, its name, its count.
+        let archived = button("put-archived", 0, cx)
+            .flex_1()
+            .min_w_0()
+            .px(px(10.))
+            .gap(px(10.))
+            .child(div().w(px(22.)).flex_shrink_0().flex().justify_center().child(Icon::default().path("icons/archive.svg").with_size(px(14.)).text_color(ink(open[0]))))
+            .child(div().flex_1().min_w_0().truncate().text_size(px(12.5)).text_color(ink(open[0])).child(t("Archived")))
+            .when(counts[0] > 0, |d| d.child(count(counts[0], open[0])));
+        // The others: square, and wide enough for their count with
+        // something in them while the sidebar has the room, so Archived
+        // keeps its name; the width is known for Hidden's coming and
+        // going. The count is on the hover too.
+        let roomy = self.sidebar_w >= px(300.);
+        let wide = move |n: usize| if n == 0 || !roomy { SHELF_H } else { 34. + 7. * n.to_string().len() as f32 };
+        let small = move |id: &'static str, section: usize, icon: &'static str, tip: &'static str, cx: &mut Context<Self>| {
+            let (n, lit) = (counts[section], open[section]);
+            let tip: SharedString = if n > 0 { format!("{} ({n})", t(tip)).into() } else { t(tip).into() };
+            button(id, section, cx)
+                .w(px(wide(n)))
+                .justify_center()
+                .gap(px(5.))
+                .managed_tooltip(move |window, cx| crate::workbench::tip(tip.clone(), window, cx))
+                .child(Icon::default().path(icon).with_size(px(14.)).text_color(ink(lit)))
+                .when(n > 0 && roomy, |d| d.child(count(n, lit)))
+                .into_any_element()
+        };
+        let temp = small("put-temp", 1, "icons/hourglass.svg", phrase("Temporary"), cx);
+        let trash = small("put-trash", 3, "icons/trash.svg", phrase("Trash"), cx);
+        let trash = div().child(trash).on_mouse_down(MouseButton::Right, cx.listener(|this, ev: &MouseDownEvent, _, cx| this.trash_menu(None, ev.position, cx)));
+        // Hidden only while a project is, coming and going in motion.
+        let hidden_moving = self.presence("put-hidden", counts[2] > 0, cx);
+        let hidden = (counts[2] > 0 || hidden_moving.is_some()).then(|| {
+            let w = wide(counts[2].max(1)) + SIDE_INSET;
+            let el = div().flex_shrink_0().overflow_hidden().pl(px(SIDE_INSET)).child(small("put-hidden", 2, "icons/eye-off.svg", phrase("Hidden"), cx));
+            match hidden_moving {
+                Some((coming, serial)) => el
+                    .with_animation(ElementId::Name(format!("put-hidden-{serial}").into()), Animation::new(FOLD_ANIM).with_easing(ease_out_quint()), move |d, t| {
+                        let t = if coming { t } else { 1. - t };
+                        d.w(px(w * t)).opacity(t)
+                    })
+                    .into_any_element(),
+                None => el.into_any_element(),
+            }
+        });
+        h_flex()
+            .flex_shrink_0()
+            .p(px(SIDE_INSET))
+            .child(archived)
+            .child(div().flex_shrink_0().pl(px(SIDE_INSET)).child(temp))
+            .children(hidden)
+            .child(div().flex_shrink_0().pl(px(SIDE_INSET)).child(trash))
+            .into_any_element()
+    }
+
     /// Whether a folder in the sidebar shows its sessions: the person's
     /// own choice, on top of what `sync_folders` opens and closes.
     fn folder_open(&self, project: &str) -> bool {
@@ -13160,27 +13222,39 @@ impl Workbench {
     }
 
     /// A folder with a live session is open without being asked: it
-    /// opens when one of its sessions goes live (at launch, every one
-    /// that has one), and closes again when the last of them stops, if
-    /// it was opened here and the person has not touched it since. A
-    /// click is the person's choice and stays until the folder next goes
-    /// live or quiet.
+    /// opens when one of its sessions goes live, and closes again when
+    /// the last of them stops, if it was opened here and the person has
+    /// not touched it since, each in motion as a click does it. A click
+    /// is the person's choice and stays until the folder next goes live
+    /// or quiet. A launch goes on from what was live when the window
+    /// last saw it, so what was open or shut then stands: a session
+    /// still live is no news. Nothing is decided before the first index
+    /// is in, which comes after the registry is read, so what is live is
+    /// known whole.
     fn sync_folders(&mut self, cx: &mut Context<Self>) {
+        if self.refs.is_empty() {
+            return;
+        }
         let live: HashSet<String> = self.refs.iter().filter(|r| self.live_color(r, cx).is_some()).map(|r| r.project()).collect();
         if live == self.folders_live {
             return;
         }
         let open = self.folders_open.get_or_insert_with(HashSet::new);
+        let mut opened = Vec::new();
         for p in live.difference(&self.folders_live) {
             if open.insert(p.clone()) {
                 self.folders_auto.insert(p.clone());
+                opened.push(p.clone());
             }
         }
+        let mut shut = Vec::new();
         for p in self.folders_live.difference(&live) {
-            if self.folders_auto.remove(p) {
-                open.remove(p);
+            if self.folders_auto.remove(p) && open.remove(p) {
+                shut.push(p.clone());
             }
         }
+        self.folder_moves(&opened, true);
+        self.folder_moves(&shut, false);
         self.folders_live = live;
         self.save_ui(false);
     }
@@ -13337,7 +13411,7 @@ impl Workbench {
     /// the number of the last change: taken off when the fade is over, it
     /// made all inside a new element whose own animations played again.
     #[allow(clippy::too_many_arguments)]
-    fn side_stack(&self, content: Div, places: &[(Option<String>, String)], place: Option<&str>, linked: bool, projects_only: bool, card_bg: Hsla, theme: &gpui_component::Theme, cx: &mut Context<Self>) -> AnyElement {
+    fn side_stack(&self, content: Div, places: &[(Option<String>, String)], place: Option<&str>, linked: bool, card_bg: Hsla, theme: &gpui_component::Theme, cx: &mut Context<Self>) -> AnyElement {
         use emaki_core::remote::LinkState;
         let at = places.iter().position(|(p, _)| p.as_deref() == place).unwrap_or(0);
         let moving = self.side_place_moved.filter(|(from, to, when)| *to == at && *from != at && *from < places.len() && when.elapsed() < FOLD_ANIM).map(|(from, _, _)| from);
@@ -13411,12 +13485,38 @@ impl Workbench {
                     .managed_tooltip(move |window, cx| crate::workbench::tip(tip.clone(), window, cx))
                     .child(Icon::default().path(if w.local() { "icons/network.svg" } else { "icons/globe.svg" }).with_size(px(13.)))
             }))
-            .children(open_place.as_deref().map(|id| dot(at, id)));
+            .children(open_place.as_deref().map(|id| dot(at, id)))
+            // Collapse All Projects, at the band's right end, while the
+            // computer's projects show; pale with none open.
+            .when(linked, |d| {
+                let any = !self.folders_open_here(place).is_empty();
+                d.child(
+                    div()
+                        .id("side-collapse-all")
+                        .size(px(22.))
+                        .mr(px(-4.))
+                        .flex_shrink_0()
+                        .rounded(px(6.))
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .text_color(theme.muted_foreground)
+                        .when(!any, |d| d.opacity(0.45))
+                        .when(any, |d| {
+                            d.cursor_pointer().hover(|s| s.bg(theme.sidebar_accent).text_color(theme.foreground)).on_click(cx.listener(|this, _, window, cx| {
+                                swallow_click(window, cx);
+                                this.collapse_all(cx);
+                            }))
+                        })
+                        .managed_tooltip(|window, cx| crate::workbench::tip(t("Collapse All Projects"), window, cx))
+                        .child(Icon::default().path("icons/fold.svg").with_size(px(14.))),
+                )
+            });
         let band = fade_in(band, format!("side-place-band-{serial}"));
         let content = fade_in(content.flex_1().min_h_0(), format!("side-place-card-{serial}"));
         let open = v_flex()
-            .mx(px(8.))
-            .mt(px(if projects_only { 8. } else { 10. }))
+            .mx(px(SIDE_GUTTER))
+            .mt(px(SIDE_GUTTER))
             .flex_1()
             .min_h_0()
             .rounded(px(10.))
@@ -13489,7 +13589,7 @@ impl Workbench {
                 }
             })
             .collect();
-        let rest = v_flex().mx(px(8.)).mt(px(8.)).mb(px(8.)).p(px(4.)).flex_shrink_0().rounded(px(10.)).border_1().border_color(theme.sidebar_border).bg(card_bg).children(others);
+        let rest = v_flex().mx(px(SIDE_GUTTER)).mt(px(SIDE_GUTTER)).mb(px(SIDE_GUTTER)).p(px(SIDE_INSET)).flex_shrink_0().rounded(px(10.)).border_1().border_color(theme.sidebar_border).bg(card_bg).children(others);
         v_flex().flex_1().min_h_0().child(open).child(rest).into_any_element()
     }
 
@@ -13545,14 +13645,17 @@ impl Workbench {
         self.side_band = Some((from, at));
         self.side_band_live = true;
         let (first, last) = (from.y.min(at.y), from.y.max(at.y));
-        let (pins, rest) = (self.pin_scroll.bounds(), self.side_scroll.bounds());
+        let (rest, shelf) = (self.side_scroll.bounds(), self.shelf_scroll.bounds());
         // The rows of one kind under the rectangle, and how far the
         // nearest of them is from where the press was.
-        let under = |rows: &[(String, Bounds<Pixels>, bool)]| -> (Vec<String>, Option<Pixels>) {
-            let hit: Vec<&(String, Bounds<Pixels>, bool)> = rows
+        let under = |rows: &[(String, Bounds<Pixels>, SideList)]| -> (Vec<String>, Option<Pixels>) {
+            let hit: Vec<&(String, Bounds<Pixels>, SideList)> = rows
                 .iter()
-                .filter(|(_, row, pinned)| {
-                    let list = if *pinned { pins } else { rest };
+                .filter(|(_, row, list)| {
+                    let list = match list {
+                        SideList::Rest => rest,
+                        SideList::Shelf => shelf,
+                    };
                     let (top, bottom) = (row.top().max(list.top()), row.bottom().min(list.bottom()));
                     top < bottom && top < last && bottom > first
                 })
@@ -13815,26 +13918,29 @@ impl Workbench {
         )
     }
 
-    /// Show the projects under "Archived" (0), "Temporary" (1) or
-    /// "Hidden" (2), the Trash (3), the pinned (4) or the rest of the
-    /// projects (5), or fold the section to its head.
+    /// Show what is under "Archived" (0), "Temporary" (1), "Hidden" (2)
+    /// or the Trash (3), or put it away again.
     fn toggle_section(&mut self, section: usize, cx: &mut Context<Self>) {
-        match section {
-            0 => self.archived_open = !self.archived_open,
-            1 => self.temp_open = !self.temp_open,
-            2 => self.hidden_open = !self.hidden_open,
-            4 => self.pins_shut = !self.pins_shut,
-            5 => self.projects_shut = !self.projects_shut,
-            _ => self.trash_open = !self.trash_open,
-        }
-        if section >= 4 {
-            self.save_ui(true);
-        }
+        // What is put away shows one section at a time, over the line of
+        // its buttons: a press opens that one and shuts any other, and a
+        // press on the one open shuts it.
+        let was = [self.archived_open, self.temp_open, self.hidden_open, self.trash_open];
+        let now = |n: usize| n == section.min(3) && !was[n];
+        (self.archived_open, self.temp_open, self.hidden_open, self.trash_open) = (now(0), now(1), now(2), now(3));
         cx.notify();
     }
 
     /// Pin a project under the ones pinned before it, or let it go.
     fn toggle_pin(&mut self, project: &str, cx: &mut Context<Self>) {
+        // Where it stood and how tall, for the room it leaves to close
+        // as it grows in at its new place.
+        let main = self.side_main.borrow().clone();
+        if let Some(ix) = main.iter().position(|p| p == project) {
+            let h = self.side_tall.borrow().get(project).copied().unwrap_or(f32::from(SIDE_ROW_H));
+            self.pin_moves.retain(|m| m.at.elapsed() < FOLDER_ANIM && m.project != project);
+            self.leaving_serial += 1;
+            self.pin_moves.push(PinMove { project: project.to_string(), from: ix, before: main.get(ix + 1).cloned(), h, at: Instant::now(), serial: self.leaving_serial });
+        }
         match self.pinned.iter().position(|p| p == project) {
             Some(ix) => {
                 self.pinned.remove(ix);
@@ -14226,8 +14332,45 @@ impl Workbench {
             open.insert(project.to_string());
         }
         let opening = open.contains(project);
-        let serial = self.folder_anim.as_ref().map(|(_, _, _, n)| n + 1).unwrap_or(0);
-        self.folder_anim = Some((project.to_string(), opening, std::time::Instant::now(), serial));
+        self.folder_moves(&[project.to_string()], opening);
+        self.save_ui(true);
+        cx.notify();
+    }
+
+    /// Folders that just opened or closed, for their sessions to unfold
+    /// or fold away; what was over long ago is forgotten.
+    fn folder_moves(&mut self, folders: &[String], opening: bool) {
+        self.folder_anim.retain(|_, (_, at, _)| at.elapsed() < FOLDER_ANIM + FOOT_STAY);
+        let now = std::time::Instant::now();
+        for p in folders {
+            self.folder_serial += 1;
+            self.folder_anim.insert(p.clone(), (opening, now, self.folder_serial));
+        }
+    }
+
+    /// The folders open in the sidebar's card on the computer it shows,
+    /// archived rows and all.
+    fn folders_open_here(&self, place: Option<&str>) -> Vec<String> {
+        let here: HashSet<String> = self.refs.iter().filter(|r| r.remote_id() == place).map(|r| r.project()).collect();
+        self.folders_open.iter().flatten().filter(|p| here.contains(entry_base(p))).cloned().collect()
+    }
+
+    /// Collapse All Projects, at the right of the card's band: every
+    /// folder open on the computer it shows folds away at once, each as
+    /// a click folds it, and is the person's choice from then on.
+    fn collapse_all(&mut self, cx: &mut Context<Self>) {
+        let place = self.side_place_now(&self.side_places());
+        let shut = self.folders_open_here(place.as_deref());
+        if shut.is_empty() {
+            return;
+        }
+        if let Some(open) = self.folders_open.as_mut() {
+            for p in &shut {
+                open.remove(p);
+                self.folders_auto.remove(p);
+            }
+        }
+        self.folder_moves(&shut, false);
         self.save_ui(true);
         cx.notify();
     }

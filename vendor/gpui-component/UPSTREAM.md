@@ -375,6 +375,8 @@ upstream revision finds them.
 82. `crates/ui/src/text/node.rs` (`attr_chip`, `AttrChip`; `render_div`'s chip and a heading's): a chip of Quarto's attributes shows their short form, the id and the classes with "…" for the rest, and a click shows them whole, wrapped, fading in; a click that selects nothing shows the short form again.
 
 83. `crates/ui/src/text/find.rs` (`TextHits`, `TextAt`), `text_view.rs` (`TextView::hits`), `state.rs`, `inline.rs` (`paint`): a view handed a `TextHits` keeps where each run of its words was painted, its layout and its text, so the application can ask which letter is under a point.
+
+84. `crates/base/src/tooltip.rs` (`TooltipOverlay::claim_by`, `held`, `request_hide_from`, `pending`), `crates/ui/src/tooltip.rs` (`managed_tooltip`'s prepaint and its hover's end): a trigger lays a hitbox of its own and claims with it, and the overlay keeps the last one that claimed: the pointer on it keeps the tooltip in a frame that claims nothing. A view the window replays from its cache (the sidebar) lays nothing out, so its triggers never claimed past the frame the pointer came in, and every tooltip in it went before it showed (entry 30's rule); a replay keeps the hitboxes with their ids. A hover's end hides only its own trigger's tooltip, shown or waiting: the pointer carried in one move from a trigger in one view onto one in another is heard entering the second first, and the first one's end hid the new tooltip.
 ## Updating
 
 Check out the new upstream revision, copy the four crates over these, re-apply

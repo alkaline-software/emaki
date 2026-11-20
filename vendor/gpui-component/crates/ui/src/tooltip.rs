@@ -277,11 +277,14 @@ pub trait ManagedTooltipExt:
 
         self.on_prepaint(move |bounds, window, cx| {
             bounds_writer.set(bounds);
+            // A hitbox of the trigger's own, which a view replayed from the
+            // window's cache keeps with its id (Emaki addition).
+            let hitbox = window.insert_hitbox(bounds, gpui::HitboxBehavior::Normal).id;
             // Drawn with the pointer on it: the tooltip showing is not
-            // left without a trigger (`TooltipOverlay::claim`).
+            // left without a trigger (`TooltipOverlay::claim_by`).
             if bounds.contains(&window.mouse_position()) {
                 if let Some(overlay) = Root::tooltip_overlay(window, cx) {
-                    overlay.read(cx).claim();
+                    overlay.read(cx).claim_by(hitbox);
                 }
             }
         })
@@ -305,7 +308,7 @@ pub trait ManagedTooltipExt:
                         });
                     } else {
                         overlay.update(cx, |o: &mut BaseTooltipOverlay, cx| {
-                            o.request_hide(window, cx);
+                            o.request_hide_from(trigger_bounds_cell.get(), window, cx);
                         });
                     }
                 }

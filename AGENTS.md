@@ -32,7 +32,7 @@ The first version of this project (then called scribe) reconstructed conversatio
 
 Emaki is an elegant app, held to the bar of the work that wins Awwwards, the Webbys and the FWA (`docs/design.md`; read it before changing anything a person sees): a considered layout, and motion wherever anything changes. Every change meets this unasked. The person has asked many times.
 
-- **Nothing changes from one frame to the next.** What appears, goes, opens, closes, grows or moves does so over a moment, with what is around it: a card, a line, an arrow, a scroll a click starts. A jump is a bug. Use the pattern its neighbors use. (`docs/window.md`, Motion)
+- **Nothing changes from one frame to the next.** What appears, goes, opens, closes, grows or moves does so over a moment, with what is around it: a card, a line, an arrow, a scroll a click starts, a row that takes another place in its list (pinned, let go, sorted). A jump is a bug, and every new action is checked for it before the reply. Use the pattern its neighbors use. (`docs/window.md`, Motion)
 - **No pause at the end of a motion.** It runs into its place and stops, with no crawl, hesitation or second step in its last frames; every new animation so far had one until it was looked for. The causes and the fix are in `docs/window.md`, Motion.
 - **What is cut says so:** it fades out at that edge and can be reached.
 - **A motion that repeats runs on the window's clock** (`ambient::phase`), never on `Animation::repeat`, which draws the whole window at the display's rate for as long as it runs. The conversation's list, the sidebar and a markdown file are views the window keeps between frames: what they are drawn from must reach them. (`docs/window.md`, Frames)

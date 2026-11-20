@@ -61,16 +61,18 @@ pub struct UiState {
     /// The sidebar's folders showing their sessions; absent until one
     /// has been opened or closed.
     pub folders_open: Option<Vec<String>>,
+    /// The folders that had a live session as the window last saw them,
+    /// and those of them it opened for that and the person has not
+    /// touched since: a launch goes on from these, so a folder the person
+    /// shut stays shut though its session is still live.
+    pub folders_live: Vec<String>,
+    pub folders_auto: Vec<String>,
     /// The projects pinned to the head of the sidebar's list, in the
     /// order they stand there.
     pub pinned: Vec<String>,
     /// The projects put out of the sidebar's list, under "Hidden" at
     /// its foot.
     pub hidden: Vec<String>,
-    /// Whether the sidebar's Pinned and Projects sections were folded to
-    /// their heads.
-    pub pins_shut: bool,
-    pub projects_shut: bool,
 }
 
 fn file() -> std::path::PathBuf {
