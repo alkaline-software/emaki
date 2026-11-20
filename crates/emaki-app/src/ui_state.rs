@@ -67,6 +67,10 @@ pub struct UiState {
     /// The projects put out of the sidebar's list, under "Hidden" at
     /// its foot.
     pub hidden: Vec<String>,
+    /// Whether the sidebar's Pinned and Projects sections were folded to
+    /// their heads.
+    pub pins_shut: bool,
+    pub projects_shut: bool,
 }
 
 fn file() -> std::path::PathBuf {

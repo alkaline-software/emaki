@@ -1817,6 +1817,15 @@
     "de": "Ablage",
     "es": "Archivo"
   },
+  "Pinned": {
+    "zh-Hans": "已置顶",
+    "zh-Hant": "已釘選",
+    "ja": "ピン留め",
+    "ko": "고정됨",
+    "fr": "Épinglés",
+    "de": "Angeheftet",
+    "es": "Fijados"
+  },
   "Raw editor": {
     "zh-Hans": "原始编辑器",
     "zh-Hant": "原始編輯器",

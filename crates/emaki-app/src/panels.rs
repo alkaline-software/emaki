@@ -6769,9 +6769,12 @@ impl Workbench {
             for (n, (ix, y)) in sticky.into_iter().enumerate() {
                 let Some(Row::Node(node, depth, _)) = rows.get(ix) else { continue };
                 let ink = status.as_ref().and_then(|st| st.mark(&node.path, true)).map(|m| git_color(m.state, dark)).unwrap_or(theme.foreground);
-                // A click brings the folder's own row to where it is held.
+                // A click brings the folder's own row to where it is held;
+                // with the row there already, the held row is that row,
+                // and a click closes the folder as a click on it does.
                 let to = -px(crate::look::ROW_BREATH + ix as f32 * f32::from(TREE_ROW_H) - n as f32 * f32::from(TREE_ROW_H)).max(px(0.));
                 let menu = node.clone();
+                let folder = node.path.clone();
                 held = held.child(
                     div()
                         .absolute()
@@ -6803,6 +6806,13 @@ impl Workbench {
                                     swallow_click(window, cx);
                                     window.focus(&this.tree_focus, cx);
                                     let from = this.files_scroll.offset().y;
+                                    if (from - to).abs() < px(1.) {
+                                        this.tree_anchor = Some(folder.clone());
+                                        this.tree.marked.clear();
+                                        this.tree.picked = Some(folder.clone());
+                                        this.tree_toggle(&folder, cx);
+                                        return;
+                                    }
                                     this.file_glide_to(from, to, |this, y, _| this.files_scroll.set_offset(point(px(0.), y)), cx);
                                 }))
                                 .on_mouse_down(

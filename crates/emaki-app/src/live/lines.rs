@@ -172,6 +172,7 @@ impl Doc {
 
     /// The offset of a place in UTF-16 units, as an input method counts.
     pub fn utf16_of(&self, p: Pos) -> usize {
+        let p = self.clamp(p);
         self.lines[..p.line].iter().map(|l| l.encode_utf16().count() + 1).sum::<usize>() + self.lines[p.line][..p.col].encode_utf16().count()
     }
 
@@ -265,7 +266,7 @@ impl Doc {
         Pos::new(p.line, col)
     }
 
-    /// The word under `p`, for a double click and for ⌘B on a caret.
+    /// The word under `p`, for a double click.
     pub fn word_at(&self, p: Pos) -> Range<usize> {
         let text = self.line(p.line);
         let is_word = |c: char| c.is_alphanumeric() || c == '_';

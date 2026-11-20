@@ -366,6 +366,13 @@ upstream revision finds them.
 
 78. `crates/ui/src/text/format/markdown.rs` (`times_signs`, `as_written`; `Node::Emphasis`, `Node::Strong`): an emphasis whose opening or closing stars stand between two digits (`16*0.9 … 15*0.9`) is its words with the stars as written, not italic or bold. The composer's editor reads them the same way (`live/markdown.rs`).
 
+79. `crates/base/src/input/base/state.rs` (`line_around_cursor`, `end_of_line`): the line the pairs (38) look at is the caret's line as written, not Home's and End's targets, and End never goes back past the caret. With soft wrap End stops after a row's last word, short of the spaces it broke at, so a caret between two of them had an end before it, and the next letter typed panicked on the slice and quit the app.
+
+80. `crates/base/src/input/base/state.rs` (`previous_boundary`): a `\r` at the text's start is not stepped back past. A file whose first line ends `\r\n` with nothing on it had the step from its start go below zero: Backspace or ← there panicked in a build with overflow checks, and in one without took the whole file into the selection.
+
+81. `crates/ui/src/text/inline.rs` (`request_layout`): inline code is set with no contextual forms or ligatures (`calt`, `clig`, `liga` off). gpui shapes a paragraph whole and wraps it after, so a mono face's `://` broken after the colon kept its slashes' form for after a colon, moved left under it: the next line's `//` stood out past the margin, outside its plate.
+
+82. `crates/ui/src/text/node.rs` (`attr_chip`, `AttrChip`; `render_div`'s chip and a heading's): a chip of Quarto's attributes shows their short form, the id and the classes with "…" for the rest, and a click shows them whole, wrapped, fading in; a click that selects nothing shows the short form again.
 ## Updating
 
 Check out the new upstream revision, copy the four crates over these, re-apply

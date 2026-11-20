@@ -25,10 +25,10 @@ About `crates/emaki-app/src/look.rs`, `fonts.rs`, `assets.rs`, `assets/`, `theme
 Three things are kept apart by more than a shade, because a window of creams a step from each other tired the eye and gave it nowhere to rest.
 
 - The frame and the sidebar on it (`title_bar.background`): a warm graphite in the light appearance (the ink's own near black was tried and was too heavy), and in the dark one a gray lighter than the page, near the light appearance's graphite, so the page is a well in a lighter shell and the sidebar is the same thing in both.
-- The page and what lies on it: in the light appearance near white with a trace of warmth, its grays (panels, tracks, bubbles, lines) the old creams with most of their color taken out. In the dark appearance the page is the darkest ground there is.
+- The page and what lies on it: in the light appearance near white with a trace of warmth, its grays (panels, tracks, bubbles, lines) the old creams with most of their color taken out. In the dark appearance the page is near black, a step above the files panel, the one ground darker than it (below).
 - The accent, the one color the window wears of its own, which is why it stands out (`docs/design.md`, The accents).
 
-The files panel, with the structure at its foot, stands a step lighter than the other panels' gray (`look::files_ground`), so the folder reads apart from the outline beside it.
+The files panel, with the structure at its foot, stands a step darker than the page in both appearances (`look::files_ground`), as VS Code's explorer stands darker than its editor: the folder is the frame around the work, and the file and the conversation beside it stand on the lighter page. In the dark appearance it was a step lighter than the page once, and the tree read as the place to look.
 
 A track of buttons (a segmented control, the tabs' pill, the pages' track in the strip, the tray under the composer) is `tab_bar.segmented.background` in the dark appearance, lighter than the page and than a card on it. It was the panels' ground, which on the darker page was the page's own shade, and a control had no edge.
 
@@ -66,6 +66,7 @@ The accent on a wash of itself. `md_view` sets the letters to `theme.link` and `
 - The plate is the vendored toolkit's `Inline::paint_code_chips`. A text highlight's own background is a square box the full height of the line, so the plate is painted before the text, one rounded quad per line of each span.
 - A text run has no padding, so the vendored markdown parser sets each span between three narrow no-break spaces (U+202F) at each end (`CODE_PADS`): the nearest is the plate's padding, the other two its margin, so the words beside it stand clear of the plate. gpui's line wrapper counts that character as part of a word, so they stay with the span at a line's end; a breaking space left the next line starting with a gap.
 - The live editor (the composer, the rendered editor) gives code the same room (`Reader::code_pads`): a code span's backtick, while it is hidden, is drawn as two narrow spaces, and a plate reaches one narrow space past its letters (`Flow::pad`). A command or a file the composer marks as code has a narrow space beside it where a space stands.
+- Code among words is set with no ligatures or contextual forms (the vendored `request_layout`, UPSTREAM.md 81). gpui shapes a paragraph whole and then wraps it, so a form chosen for its neighbor stays after a break between them: a URL broken after `https:` had its `//` moved left, under a colon now on the line above, and out past the margin.
 - The view's Copy action takes the spaces out again. The copy buttons read the model and never see them.
 - **The words' size is an anchor**: code among words stands a little under it and a little lighter, in a cut of the mono face made for it (below, The faces). On its plate it looked larger than the words around it, and a monospace letter, wider than a word's, read as heavier at the same weight. A gpui text run carries a face but no size, so a smaller size is a font of its own.
 

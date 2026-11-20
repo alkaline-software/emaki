@@ -369,8 +369,18 @@ fn read(text: &str, header: bool) -> Analysis {
                     lines[line].list = Some(ListMark { marker: from..from + item.marker.len(), kind: item.kind, depth });
                     lines[line].task_done = matches!(item.kind, ListKind::Task(true));
                 }
+                // The item's own line and the lines written in under it.
+                // A line after it written at the margin (markdown's lazy
+                // line, or a line left empty) stands at the margin as it
+                // is written: drawn at the item's indent, the caret stood
+                // there on a list just ended and the words typed came out
+                // at the margin.
                 for l in line..=last_line_of(&r).min(n - 1) {
-                    lines[l].list_depth = lines[l].list_depth.max(depth + 1);
+                    let t = line_text(l);
+                    let body = &t[quote_line(t).map_or(0, |(_, at)| at)..];
+                    if l == line || body.starts_with([' ', '\t']) {
+                        lines[l].list_depth = lines[l].list_depth.max(depth + 1);
+                    }
                 }
                 if let Some(&ix) = lists.last() {
                     a.lists[ix].items.push(line);
@@ -1013,6 +1023,18 @@ pub fn visible_part(text: &str, from: usize, to: usize, hidden: &[Range<usize>])
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_line_at_the_margin_after_an_item_stands_at_the_margin() {
+        // A list ended by ↩ on an empty item: the line left, and what is
+        // typed on it, are at the margin, empty or not.
+        for text in ["1. one\n2. two\n", "1. one\n2. two\nNext", "1. one\n2. two\n\n\nPlease"] {
+            assert_eq!(analyze(text).lines[2].list_depth, 0, "{text:?}");
+        }
+        // Lines written in under an item are the item's.
+        let a = analyze("- one\n  more\n  - two\n    deeper\n");
+        assert_eq!(a.lines.iter().map(|l| l.list_depth).collect::<Vec<_>>()[..4], [1, 1, 2, 2]);
+    }
 
     #[test]
     fn blocks_are_told_by_the_line() {

@@ -565,6 +565,93 @@ impl DivAttrs {
     }
 }
 
+/// How long a chip of attributes takes to show its other form.
+const ATTR_CHIP_FADE: std::time::Duration = std::time::Duration::from_millis(160);
+
+/// Whether a chip of attributes shows them whole, and when it last
+/// changed.
+#[derive(Default)]
+struct AttrChip {
+    whole: bool,
+    at: Option<std::time::Instant>,
+}
+
+/// Quarto's attributes as a quiet chip in the mono face (Emaki
+/// addition). What shows first is their short form on one line: the id
+/// and the classes, with "…" for the rest (`{.fig …}`). A click shows
+/// them whole, wrapped to the room, as an address bar shows the whole
+/// address once it is clicked, and a click that selects nothing shows
+/// the short form again. Each change fades the words in. A long set of
+/// attributes, shown whole, ran past the pane's edge and drowned the
+/// words under it.
+fn attr_chip(words: &Paragraph, node_cx: &NodeContext, window: &mut Window, cx: &mut App) -> AnyElement {
+    let attrs = DivAttrs::parse(&words.text());
+    let parts: Vec<String> = attrs.id.iter().map(|id| format!("#{id}")).chain(attrs.classes.iter().map(|c| format!(".{c}"))).collect();
+    let mut short = parts.join(" ");
+    if !attrs.pairs.is_empty() {
+        short.push_str(if parts.is_empty() { "…" } else { " …" });
+    }
+    let short = format!("{{{short}}}");
+    let cut = short != format!("{{{}}}", attrs.text);
+    let base = div()
+        .min_w_0()
+        .px(px(6.))
+        .py(px(1.))
+        .rounded(px(5.))
+        .border_1()
+        .border_color(cx.theme().border)
+        .bg(cx.theme().muted)
+        .font_family(cx.theme().mono_font_family.clone())
+        .font_weight(FontWeight::NORMAL)
+        .text_size(px(11.))
+        .line_height(px(16.))
+        .text_color(cx.theme().muted_foreground);
+    if !cut {
+        return base.flex_shrink_0().child(words.render(node_cx, window, cx)).into_any_element();
+    }
+    use std::hash::{Hash as _, Hasher as _};
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    attrs.text.hash(&mut h);
+    let state = window.use_keyed_state(SharedString::from(format!("attr-chip-{:x}", h.finish())), cx, |_, _| AttrChip::default());
+    let (whole, at) = {
+        let s = state.read(cx);
+        (s.whole, s.at)
+    };
+    let k = at.map_or(1., |at| (at.elapsed().as_secs_f32() / ATTR_CHIP_FADE.as_secs_f32()).min(1.));
+    if k < 1. {
+        window.request_animation_frame();
+    }
+    // Eased out: it runs into place and stops.
+    let k = 1. - (1. - k) * (1. - k);
+    let shown = if whole {
+        div().child(words.render(node_cx, window, cx)).into_any_element()
+    } else {
+        div().truncate().child(short).into_any_element()
+    };
+    base.id(SharedString::from(format!("attr-chip-{:p}", Arc::as_ptr(&words.state))))
+        .when(!whole, |d| d.max_w_full().cursor_pointer())
+        .when(whole, |d| d.flex_shrink(1.))
+        .child(div().opacity(k).child(shown))
+        .on_click(move |ev, window, cx| {
+            // A drag in the words shown whole selects them, and leaves
+            // them whole.
+            if let gpui::ClickEvent::Mouse(m) = ev {
+                let moved = m.up.position - m.down.position;
+                if moved.x.abs() > px(3.) || moved.y.abs() > px(3.) {
+                    return;
+                }
+            }
+            cx.stop_propagation();
+            state.update(cx, |s, cx| {
+                s.whole = !s.whole;
+                s.at = Some(std::time::Instant::now());
+                cx.notify();
+            });
+            window.refresh();
+        })
+        .into_any_element()
+}
+
 /// Where the first word of an attribute list ends: at a space outside
 /// quotes.
 fn word_end(text: &str) -> usize {
@@ -3061,21 +3148,7 @@ impl BlockNode {
             let n = children.len();
             children.iter().enumerate().map(|(i, c)| c.render_block(NodeRenderOptions { ix: i, is_last: i + 1 == n, ..options }, node_cx, window, cx)).collect()
         };
-        let chip = |chip: &Paragraph, window: &mut Window, cx: &mut App| {
-            div()
-                .flex_shrink_0()
-                .px(px(6.))
-                .py(px(1.))
-                .rounded(px(5.))
-                .border_1()
-                .border_color(cx.theme().border)
-                .bg(cx.theme().muted)
-                .font_family(cx.theme().mono_font_family.clone())
-                .text_size(px(11.))
-                .line_height(px(16.))
-                .text_color(cx.theme().muted_foreground)
-                .child(chip.render(node_cx, window, cx))
-        };
+        let chip = |chip: &Paragraph, window: &mut Window, cx: &mut App| attr_chip(chip, node_cx, window, cx);
         let callout = attrs.classes.iter().find_map(|c| c.strip_prefix("callout-")).map(str::to_string).or_else(|| attrs.has_class("callout").then(|| "note".to_string()));
         if let Some(kind) = callout {
             return Self::render_callout(&kind, attrs, children, options, mb, node_cx, window, cx);
@@ -3659,22 +3732,7 @@ impl BlockNode {
                 let level = *level;
                 // Quarto's attributes, in a quiet chip after the words,
                 // small whatever the heading's size. (Emaki addition.)
-                let chip = attrs.as_ref().map(|attrs| {
-                    div()
-                        .flex_shrink_0()
-                        .px(px(6.))
-                        .py(px(1.))
-                        .rounded(px(5.))
-                        .border_1()
-                        .border_color(cx.theme().border)
-                        .bg(cx.theme().muted)
-                        .font_family(cx.theme().mono_font_family.clone())
-                        .font_weight(FontWeight::NORMAL)
-                        .text_size(px(11.))
-                        .line_height(px(16.))
-                        .text_color(cx.theme().muted_foreground)
-                        .child(attrs.render(node_cx, window, cx))
-                });
+                let chip = attrs.as_ref().map(|attrs| attr_chip(attrs, node_cx, window, cx));
                 div()
                     .id(SharedString::from(format!("h{}-{}", level, ix)))
                     .relative()

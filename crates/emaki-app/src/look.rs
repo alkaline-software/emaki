@@ -78,10 +78,10 @@ pub fn on_frame() -> (&'static str, &'static str) {
 }
 
 /// The files panel's ground, which the structure at its foot shares: a
-/// step lighter than the gray of the panels beside it, so the folder
-/// reads apart from the outline next to it.
+/// step darker than the page the file and the conversation stand on, in
+/// both appearances, as VS Code's explorer is darker than its editor.
 pub fn files_ground(theme: &Theme) -> gpui::Hsla {
-    let hex = if theme.mode.is_dark() { 0x2a2927 } else { 0xf5f4f2 };
+    let hex = if theme.mode.is_dark() { 0x171615 } else { 0xf5f4f2 };
     gpui::rgb(hex).into()
 }
 

@@ -1560,7 +1560,9 @@ impl<M: InputModeKind> InputBaseState<M> {
                     let row_text = self.text.slice(logical_start + range.start..visual_end).to_string();
                     visual_end = logical_start + range.start + row_text.trim_end_matches([' ', '\t']).len();
                 }
-                if self.cursor() != visual_end {
+                // A caret among those spaces is past the row's end: End
+                // goes on to the line's, never back.
+                if self.cursor() < visual_end {
                     return visual_end;
                 }
             }
@@ -1706,9 +1708,14 @@ impl<M: InputModeKind> InputBaseState<M> {
         self.auto_closed.iter().any(|(_, c)| *c == at)
     }
 
-    /// The caret's line, up to the caret and after it.
+    /// The caret's line as written, up to the caret and after it. Not
+    /// Home's and End's targets: with soft wrap those are a row's, and End
+    /// stops short of the spaces a row broke at, before a caret between
+    /// them, which made the slice panic. (Emaki addition.)
     fn line_around_cursor(&self) -> (String, String) {
-        let (start, end, at) = (self.start_of_line(), self.end_of_line(), self.cursor());
+        let at = self.cursor().min(self.text.len());
+        let row = self.text.offset_to_point(at).row;
+        let (start, end) = (self.text.line_start_offset(row).min(at), self.text.line_end_offset(row).max(at));
         (self.text.slice(start..at).to_string(), self.text.slice(at..end).to_string())
     }
 
@@ -2675,7 +2682,8 @@ impl<M: InputModeKind> InputBaseState<M> {
     pub(super) fn previous_boundary(&self, offset: usize) -> usize {
         let mut offset = self.text.clip_offset(offset.saturating_sub(1), Bias::Left);
         if let Some(ch) = self.text.char_at(offset) {
-            if ch == '\r' {
+            // Emaki: not past the start, where a text opens with "\r\n".
+            if ch == '\r' && offset > 0 {
                 offset -= 1;
             }
         }

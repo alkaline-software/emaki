@@ -573,6 +573,11 @@ impl Element for Inline {
                 // either inside a code span or outside it.
                 if ranges.iter().any(|r| r.start <= range.start && range.end <= r.end) {
                     run_style.font_family = family.clone();
+                    // No contextual forms: a paragraph is shaped whole and
+                    // wrapped after, so the slashes of a "://" broken
+                    // after its colon kept the form that tucks under the
+                    // colon and stood out past the margin. (Emaki addition.)
+                    run_style.font_features = gpui::FontFeatures(std::sync::Arc::new(vec![("calt".into(), 0), ("clig".into(), 0), ("liga".into(), 0)]));
                 }
             }
             // A formula's room is set in the math face, whose spaces are as

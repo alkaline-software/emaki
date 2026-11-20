@@ -1277,6 +1277,10 @@ impl Editor {
     /// After every change: the text read again, numbered lists put
     /// right, the caret shown, the view around told.
     fn after_edit(&mut self, cx: &mut Context<Self>) {
+        // A word an input method was composing is not where it was once
+        // the text changed under it: kept, its place was read past a
+        // line's end at the next key, and the app quit.
+        self.marked = None;
         self.reanalyze();
         self.renumber();
         if !self.find_query.is_empty() {
@@ -1663,21 +1667,24 @@ impl Editor {
         cx.notify();
     }
 
-    /// ⌘B, ⌘I, ⇧⌘C, ⌘U and ⇧⌘X: a span of the kind around or under the
-    /// caret is unwrapped; a selection is wrapped; a caret on a word wraps
-    /// the word; a caret on nothing opens an empty pair to type into, and
-    /// in such a pair closes it again. The spans are the markdown's
-    /// whether or not it is drawn as it reads, so a key pressed again
-    /// takes off what it put on, with live markdown off too.
-    fn toggle_wrap(&mut self, open: &str, close: &str, kind: SpanKind, cx: &mut Context<Self>) {
+    /// ⌘B, ⌘I, ⇧⌘C, ⌘U and ⇧⌘X act on a selection alone: a span of the
+    /// kind around it is unwrapped, else it is wrapped. The spans are the
+    /// markdown's whether or not it is drawn as it reads, so a key pressed
+    /// again takes off what it put on, with live markdown off too. With
+    /// nothing selected the key is not the editor's (false), and goes on
+    /// to the window: ⌘B is the sidebar's there.
+    fn toggle_wrap(&mut self, open: &str, close: &str, kind: SpanKind, cx: &mut Context<Self>) -> bool {
+        if self.sel.anchor == self.sel.head {
+            return false;
+        }
         if self.locked() {
-            return;
+            return true;
         }
         // In Typst or LaTeX, that language's marks.
         let (open, close) = match self.dialect {
             Some(d) => match d.wrap(&kind) {
                 Some(marks) => marks,
-                None => return,
+                None => return true,
             },
             None => (open, close),
         };
@@ -1711,68 +1718,53 @@ impl Editor {
             self.doc.replace_many(vec![(open, open_end, String::new()), (close, close_end, String::new())], before, after);
             self.sel = Sel { anchor: self.doc.clamp(after.anchor), head: self.doc.clamp(after.head) };
             self.after_edit(cx);
-            return;
+            return true;
         }
-        if a != b {
-            let text = self.doc.slice(a, b);
-            let lead = text.len() - text.trim_start().len();
-            let trail = text.len() - text.trim_end().len();
-            let (ta, tb) = (self.doc.pos_of(ga + lead), self.doc.pos_of(gb - trail));
-            if ta >= tb {
-                return;
-            }
-            let before = self.sel;
-            self.doc.replace_many(vec![(ta, ta, open.to_string()), (tb, tb, close.to_string())], before, before);
-            let inner_a = Pos::new(ta.line, ta.col + open.len());
-            let inner_b = if tb.line == ta.line { Pos::new(tb.line, tb.col + open.len()) } else { tb };
-            self.sel = Sel { anchor: inner_a, head: inner_b };
-            self.after_edit(cx);
-            return;
+        let text = self.doc.slice(a, b);
+        let lead = text.len() - text.trim_start().len();
+        let trail = text.len() - text.trim_end().len();
+        let (ta, tb) = (self.doc.pos_of(ga + lead), self.doc.pos_of(gb - trail));
+        if ta >= tb {
+            return true;
         }
-        let word = self.doc.word_at(a);
-        if word.start < word.end {
-            let (wa, wb) = (Pos::new(a.line, word.start), Pos::new(a.line, word.end));
-            let before = self.sel;
-            let caret = Pos::new(a.line, a.col + open.len());
-            self.doc.replace_many(vec![(wa, wa, open.to_string()), (wb, wb, close.to_string())], before, Sel::caret(caret));
-            self.sel = Sel::caret(caret);
-            self.after_edit(cx);
-            return;
-        }
-        let line = self.doc.line(a.line);
-        if line[..a.col].ends_with(open) && line[a.col..].starts_with(close) {
-            let from = Pos::new(a.line, a.col - open.len());
-            let to = Pos::new(a.line, a.col + close.len());
-            self.replace_range(from, to, "", cx);
-            return;
-        }
-        let caret = Pos::new(a.line, a.col + open.len());
-        self.doc.replace(a, a, &format!("{open}{close}"), self.sel);
-        self.sel = Sel::caret(caret);
+        let before = self.sel;
+        self.doc.replace_many(vec![(ta, ta, open.to_string()), (tb, tb, close.to_string())], before, before);
+        let inner_a = Pos::new(ta.line, ta.col + open.len());
+        let inner_b = if tb.line == ta.line { Pos::new(tb.line, tb.col + open.len()) } else { tb };
+        self.sel = Sel { anchor: inner_a, head: inner_b };
         self.after_edit(cx);
+        true
     }
 
     fn bold(&mut self, _: &Bold, _: &mut Window, cx: &mut Context<Self>) {
-        self.toggle_wrap("**", "**", SpanKind::Strong, cx);
+        if !self.toggle_wrap("**", "**", SpanKind::Strong, cx) {
+            cx.propagate();
+        }
     }
 
     fn italic(&mut self, _: &Italic, _: &mut Window, cx: &mut Context<Self>) {
-        self.toggle_wrap("*", "*", SpanKind::Em, cx);
+        if !self.toggle_wrap("*", "*", SpanKind::Em, cx) {
+            cx.propagate();
+        }
     }
 
     /// ⇧⌘C, as Slack has it: words made code, and code made words again.
     fn code(&mut self, _: &Code, _: &mut Window, cx: &mut Context<Self>) {
-        self.toggle_wrap("`", "`", SpanKind::Code, cx);
+        if !self.toggle_wrap("`", "`", SpanKind::Code, cx) {
+            cx.propagate();
+        }
     }
 
-    /// ⌘U: words underlined with `<u>`, or underlined no more.
-    pub fn underline(&mut self, cx: &mut Context<Self>) {
-        self.toggle_wrap("<u>", "</u>", SpanKind::Underline, cx);
+    /// ⌘U: words underlined with `<u>`, or underlined no more. False with
+    /// nothing selected, for the caller to let the key go on.
+    pub fn underline(&mut self, cx: &mut Context<Self>) -> bool {
+        self.toggle_wrap("<u>", "</u>", SpanKind::Underline, cx)
     }
 
-    /// ⇧⌘X: words struck through with `~~`, or struck no more.
-    pub fn strike(&mut self, cx: &mut Context<Self>) {
-        self.toggle_wrap("~~", "~~", SpanKind::Strike, cx);
+    /// ⇧⌘X: words struck through with `~~`, or struck no more. False with
+    /// nothing selected.
+    pub fn strike(&mut self, cx: &mut Context<Self>) -> bool {
+        self.toggle_wrap("~~", "~~", SpanKind::Strike, cx)
     }
 
     /// ⌘↩: a task's box ticked or cleared; a bullet made a task; a plain
@@ -3067,7 +3059,10 @@ impl Editor {
             pointer: self.pointer,
             inks: self.look.colors,
             cache: self.cache.clone(),
-            blocks: self.analysis.code_blocks.iter().filter(|b| b.markup.is_none()).filter_map(|b| Some((b.first, b.last, reader.base_inset(self.analysis.lines.get(b.first)?)))).collect(),
+            // A block a piece covers, shut, is the piece (a raw block of
+            // HTML read as the page it makes): no plate of code behind it,
+            // whose edge the piece's words stood against.
+            blocks: self.analysis.code_blocks.iter().filter(|b| b.markup.is_none() && !self.shut.iter().any(|(f, l, _)| *f <= b.first && b.last <= *l)).filter_map(|b| Some((b.first, b.last, reader.base_inset(self.analysis.lines.get(b.first)?)))).collect(),
             tables: self.analysis.tables.iter().map(|t| (t.first, t.last)).collect(),
             sel: self.sel,
             marked: self.marked,

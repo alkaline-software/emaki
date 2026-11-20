@@ -954,6 +954,33 @@ fn side_rule(theme: &gpui_component::Theme) -> Div {
     div().h(SIDE_RULE_H).flex_shrink_0().flex().items_center().px(px(10.)).child(div().h(px(1.)).w_full().bg(theme.sidebar_border))
 }
 
+/// A section's head in the sidebar's card: its icon, its name, how many
+/// it holds and the chevron that folds it. The Pinned and the Projects
+/// sections are the card's own and stand out: their icon on a tile of
+/// the accent, their name in the ink. Archived, Temporary, Hidden and
+/// the Trash are where what is put away goes, and are quiet: the icon
+/// and the name muted, smaller. The icon stands in the folder icon's
+/// column, so a head's name starts where a project's does.
+fn section_head(theme: &gpui_component::Theme, id: &'static str, icon: &'static str, label: &str, count: usize, open: bool, primary: bool) -> Stateful<Div> {
+    let mark = Icon::default().path(icon).with_size(px(if primary { 12.5 } else { 13. })).text_color(if primary { theme.primary } else { theme.muted_foreground });
+    let mark = if primary { div().size(px(20.)).rounded(px(6.)).bg(theme.primary.opacity(0.18)).flex().items_center().justify_center().child(mark) } else { div().flex().justify_center().child(mark) };
+    h_flex()
+        .id(id)
+        .h(SIDE_ROW_H)
+        .px(px(10.))
+        .gap(px(10.))
+        .flex_shrink_0()
+        .items_center()
+        .cursor_pointer()
+        .relative()
+        .group("side-row")
+        .child(crate::look::row_plate(8., (false, false)).group_hover("side-row", |s| s.bg(theme.sidebar_accent.opacity(0.6))))
+        .child(div().w(px(22.)).flex_shrink_0().flex().justify_center().child(mark))
+        .child(div().flex_1().min_w_0().truncate().font_weight(FontWeight::SEMIBOLD).text_size(px(if primary { 12. } else { 11. })).text_color(if primary { theme.sidebar_foreground } else { theme.muted_foreground }).child(t(label).to_string()))
+        .child(div().text_size(px(11.)).text_color(theme.muted_foreground).child(count.to_string()))
+        .child(Icon::new(if open { IconName::ChevronDown } else { IconName::ChevronRight }).with_size(px(12.)).text_color(theme.muted_foreground))
+}
+
 /// The mark of another computer, wherever one is named: a desktop with
 /// the arrow of one reached from here. This computer's is the desktop alone.
 pub(crate) const REMOTE_ICON: &str = "icons/device-desktop-share.svg";
@@ -2105,6 +2132,10 @@ pub struct Workbench {
     /// foot, and whether that section shows them.
     hidden: Vec<String>,
     hidden_open: bool,
+    /// Whether the Pinned and the Projects sections are folded to their
+    /// heads. Kept in `ui.json`, as the pins are.
+    pins_shut: bool,
+    projects_shut: bool,
     /// The sessions' folders that are gone, and where each may be now,
     /// as the scanner last looked (`moves::survey`).
     folders: emaki_core::moves::Survey,
@@ -4936,6 +4967,8 @@ impl Workbench {
             pinned: ui.pinned.clone(),
             hidden: ui.hidden.clone(),
             hidden_open: false,
+            pins_shut: ui.pins_shut,
+            projects_shut: ui.projects_shut,
             folders: Default::default(),
             remote_links: HashMap::new(),
             remote_ever: HashSet::new(),
@@ -6402,6 +6435,8 @@ impl Workbench {
             Some("projects:hide") => self.projects_do(ProjectsDo::Hide, self.side_marked.clone(), cx),
             Some("projects:show") => self.projects_do(ProjectsDo::Show, self.side_marked.clone(), cx),
             Some("hidden") => self.toggle_section(2, cx),
+            Some("pins") => self.toggle_section(4, cx),
+            Some("rest") => self.toggle_section(5, cx),
             Some("temporary") => self.toggle_section(1, cx),
             Some("archived") => self.toggle_section(0, cx),
             // A click on a section's heading on the sessions page:
@@ -7222,6 +7257,8 @@ impl Workbench {
             }),
             pinned: self.pinned.clone(),
             hidden: self.hidden.clone(),
+            pins_shut: self.pins_shut,
+            projects_shut: self.projects_shut,
         }
         .save();
         self.last_ui_save = std::time::Instant::now();
@@ -12276,7 +12313,25 @@ impl Workbench {
         let section_shown = [0, 1, 2].map(|n| section_open[n] || section_moving[n].is_some());
         let mut section_box = [0, 1, 2].map(|_| v_flex().flex_shrink_0().overflow_hidden());
         let mut section_h = [0f32; 3];
-        *self.side_drawn.borrow_mut() = folders.iter().enumerate().filter(|(at, _)| section_of(*at).is_none_or(|section| section_open[section])).map(|(_, (p, _))| p.clone()).collect();
+        // The pinned and the rest of the projects fold to their heads as
+        // the sections at the foot do, and stay folded past a launch.
+        let rest_n = archived_from.saturating_sub(pinned_n);
+        let (pins_open, rest_open) = (!self.pins_shut, !self.projects_shut);
+        let pins_moving = self.presence("side-pins", pins_open, cx);
+        let rest_moving = self.presence("side-rest", rest_open, cx);
+        let (pins_shown, rest_shown) = (pins_open || pins_moving.is_some(), rest_open || rest_moving.is_some());
+        let (mut pins_h, mut rest_h) = (0f32, 0f32);
+        let mut rest_box = v_flex().flex_shrink_0().overflow_hidden();
+        *self.side_drawn.borrow_mut() = folders
+            .iter()
+            .enumerate()
+            .filter(|(at, _)| match section_of(*at) {
+                Some(section) => section_open[section],
+                None if *at < pinned_n => pins_open,
+                None => rest_open,
+            })
+            .map(|(_, (p, _))| p.clone())
+            .collect();
         let rule = self.presence("pin-rule", divided, cx);
         // The pinned projects are a block of their own over the rest,
         // which the rest scrolls under, and the line is its foot.
@@ -12297,17 +12352,22 @@ impl Workbench {
             let theme = Self::shell_theme(cx);
             let is_pinned = at < pinned_n;
             let section = section_of(at);
-            if section.is_some_and(|section| !section_shown[section]) {
+            if section.is_some_and(|section| !section_shown[section]) || (is_pinned && !pins_shown) || (section.is_none() && !is_pinned && !rest_shown) {
                 continue;
             }
-            // A pinned project's rows go to the block over the rest,
-            // and a temporary or hidden one's to its block at the foot:
-            // `scroll` is that block until this project is drawn.
+            // A pinned project's rows go to the block over the rest, the
+            // rest's to the Projects section's block, and a temporary or
+            // hidden one's to its block at the foot: `scroll` is that
+            // block until this project is drawn.
             if is_pinned {
                 std::mem::swap(&mut scroll, &mut pins);
+                pins_h += f32::from(SIDE_ROW_H);
             } else if let Some(section) = section {
                 std::mem::swap(&mut scroll, &mut section_box[section]);
                 section_h[section] += f32::from(SIDE_ROW_H);
+            } else {
+                std::mem::swap(&mut scroll, &mut rest_box);
+                rest_h += f32::from(SIDE_ROW_H);
             }
             // The project leaving is drawn as any other, into a box of
             // its own that closes (`close_leaving`).
@@ -12489,6 +12549,8 @@ impl Workbench {
                     std::mem::swap(&mut scroll, &mut pins);
                 } else if let Some(section) = section {
                     std::mem::swap(&mut scroll, &mut section_box[section]);
+                } else {
+                    std::mem::swap(&mut scroll, &mut rest_box);
                 }
                 continue;
             }
@@ -12682,10 +12744,36 @@ impl Workbench {
                 scroll = scroll.child(fold_row(leaving_box, f32::from(SIDE_ROW_H) + body_h, coming, serial));
             }
             if is_pinned {
+                pins_h += body_h;
                 std::mem::swap(&mut scroll, &mut pins);
             } else if let Some(section) = section {
                 section_h[section] += body_h;
                 std::mem::swap(&mut scroll, &mut section_box[section]);
+            } else {
+                rest_h += body_h;
+                std::mem::swap(&mut scroll, &mut rest_box);
+            }
+        }
+        // A block that folds runs its box from its height to nothing and
+        // back, what is in it fading with it, each fold once.
+        let fold_box = |block: Div, id: &'static str, moving: Option<(bool, u32)>, full: f32| -> AnyElement {
+            match moving {
+                Some((coming, serial)) => block
+                    .with_animation(ElementId::Name(format!("{id}-{serial}").into()), Animation::new(FOLD_ANIM).with_easing(ease_out_quint()), move |d, t| {
+                        let t = if coming { t } else { 1. - t };
+                        d.h(px(full * t)).opacity(t)
+                    })
+                    .into_any_element(),
+                None => block.into_any_element(),
+            }
+        };
+        // "Projects": the projects neither pinned nor put away, under a
+        // head that folds them, at the top of what scrolls.
+        if rest_n > 0 {
+            let theme = Self::shell_theme(cx);
+            scroll = scroll.child(section_head(&theme, "side-rest", "icons/folders.svg", phrase("Projects"), rest_n, rest_open, true).on_click(cx.listener(|this, _, _, cx| if !this.side_banded() { this.toggle_section(5, cx) })));
+            if rest_shown {
+                scroll = scroll.child(fold_box(rest_box, "side-rest", rest_moving, rest_h));
             }
         }
         let rule_el = (divided || rule.is_some()).then(|| rule_line(&Self::shell_theme(cx)));
@@ -12698,7 +12786,7 @@ impl Workbench {
         // projects, drawn the same (`side_rule`).
         let mut first_head = true;
         let above = archived_from > 0;
-        for (section, (label, id, count), block) in [(phrase("Archived"), "side-archived", archived_n), (phrase("Temporary"), "side-temp", temp_n), (phrase("Hidden"), "side-hidden", hidden_n)].into_iter().zip(section_box).enumerate().map(|(n, (said, block))| (n, said, block)) {
+        for (section, (label, id, icon, count), block) in [(phrase("Archived"), "side-archived", "icons/archive.svg", archived_n), (phrase("Temporary"), "side-temp", "icons/hourglass.svg", temp_n), (phrase("Hidden"), "side-hidden", "icons/eye-off.svg", hidden_n)].into_iter().zip(section_box).enumerate().map(|(n, (said, block))| (n, said, block)) {
             if count == 0 {
                 continue;
             }
@@ -12707,26 +12795,7 @@ impl Workbench {
             if lead && above {
                 scroll = scroll.child(side_rule(&theme));
             }
-            scroll = scroll.child(
-                h_flex()
-                    .id(id)
-                    .h(SIDE_ROW_H)
-                    .px(px(10.))
-                    .gap(px(6.))
-                    .flex_shrink_0()
-                    .items_center()
-                    .cursor_pointer()
-                    .text_size(px(11.))
-                    .font_weight(FontWeight::SEMIBOLD)
-                    .text_color(theme.muted_foreground)
-                    .relative()
-                    .group("side-row")
-                    .child(crate::look::row_plate(8., (false, false)).group_hover("side-row", |s| s.bg(theme.sidebar_accent.opacity(0.6))))
-                    .on_click(cx.listener(move |this, _, _, cx| if !this.side_banded() { this.toggle_section(section, cx) }))
-                    .child(div().flex_1().child(t(label)))
-                    .child(div().font_weight(FontWeight::NORMAL).child(count.to_string()))
-                    .child(Icon::new(if section_open[section] { IconName::ChevronDown } else { IconName::ChevronRight }).with_size(px(12.)).text_color(theme.muted_foreground)),
-            );
+            scroll = scroll.child(section_head(&theme, id, icon, label, count, section_open[section], false).on_click(cx.listener(move |this, _, _, cx| if !this.side_banded() { this.toggle_section(section, cx) })));
             if section_shown[section] {
                 let full = section_h[section];
                 scroll = scroll.child(match section_moving[section] {
@@ -12753,25 +12822,9 @@ impl Workbench {
             let count = self.trashed.len();
             // Its line comes and goes with it, as one.
             let lined = above || archived_n + temp_n + hidden_n > 0;
-            let head = h_flex()
-                .id("side-trash")
-                .h(SIDE_ROW_H)
-                .px(px(10.))
-                .gap(px(6.))
-                .flex_shrink_0()
-                .items_center()
-                .cursor_pointer()
-                .text_size(px(11.))
-                .font_weight(FontWeight::SEMIBOLD)
-                .text_color(theme.muted_foreground)
-                .relative()
-                .group("side-row")
-                .child(crate::look::row_plate(8., (false, false)).group_hover("side-row", |s| s.bg(theme.sidebar_accent.opacity(0.6))))
+            let head = section_head(&theme, "side-trash", "icons/trash.svg", phrase("Trash"), count, open, false)
                 .on_click(cx.listener(|this, _, _, cx| if !this.side_banded() { this.toggle_section(3, cx) }))
-                .on_mouse_down(MouseButton::Right, cx.listener(|this, ev: &MouseDownEvent, _, cx| this.trash_menu(None, ev.position, cx)))
-                .child(div().flex_1().child(t("Trash")))
-                .child(div().font_weight(FontWeight::NORMAL).child(count.to_string()))
-                .child(Icon::new(if open { IconName::ChevronDown } else { IconName::ChevronRight }).with_size(px(12.)).text_color(theme.muted_foreground));
+                .on_mouse_down(MouseButton::Right, cx.listener(|this, ev: &MouseDownEvent, _, cx| this.trash_menu(None, ev.position, cx)));
             let head = v_flex().flex_shrink_0().when(lined, |d| d.child(side_rule(&theme))).child(head);
             let tall = SIDE_ROW_H + if lined { SIDE_RULE_H } else { px(0.) };
             scroll = scroll.child(match trash_head {
@@ -13045,15 +13098,22 @@ impl Workbench {
                 // scrolls. They take what they need up to half the card,
                 // and past that scroll by themselves, so the rest always
                 // has the other half.
+                // Their head stands over them and does not scroll; folded,
+                // the block is the head alone.
                 .when(pinned_n > 0, |d| {
-                    d.child(
-                        v_flex()
-                            .relative()
-                            .flex_shrink_0()
-                            .max_h(gpui::relative(0.5))
-                            .child(v_flex().id("pin-scroll").min_h_0().overflow_y_scroll().track_scroll(&self.pin_scroll).px(px(4.)).child(pins.py(px(crate::look::ROW_BREATH))))
-                            .vertical_scrollbar(&self.pin_scroll),
-                    )
+                    let theme = Self::shell_theme(cx);
+                    let head = section_head(&theme, "side-pins", "icons/pin.svg", phrase("Pinned"), pinned_n, pins_open, true).on_click(cx.listener(|this, _, _, cx| if !this.side_banded() { this.toggle_section(4, cx) }));
+                    let pins = pins.overflow_hidden();
+                    d.child(div().flex_shrink_0().px(px(4.)).pt(px(crate::look::ROW_BREATH)).child(head)).when(pins_shown, |d| {
+                        d.child(
+                            v_flex()
+                                .relative()
+                                .flex_shrink_0()
+                                .max_h(gpui::relative(0.5))
+                                .child(v_flex().id("pin-scroll").min_h_0().overflow_y_scroll().track_scroll(&self.pin_scroll).px(px(4.)).child(fold_box(pins, "side-pins", pins_moving, pins_h).into_any_element()))
+                                .vertical_scrollbar(&self.pin_scroll),
+                        )
+                    })
                 })
                 .children(rule_el.map(|line| div().flex_shrink_0().px(px(4.)).child(line)))
                 .child(
@@ -13756,13 +13816,19 @@ impl Workbench {
     }
 
     /// Show the projects under "Archived" (0), "Temporary" (1) or
-    /// "Hidden" (2), or the Trash (3), or put them away.
+    /// "Hidden" (2), the Trash (3), the pinned (4) or the rest of the
+    /// projects (5), or fold the section to its head.
     fn toggle_section(&mut self, section: usize, cx: &mut Context<Self>) {
         match section {
             0 => self.archived_open = !self.archived_open,
             1 => self.temp_open = !self.temp_open,
             2 => self.hidden_open = !self.hidden_open,
+            4 => self.pins_shut = !self.pins_shut,
+            5 => self.projects_shut = !self.projects_shut,
             _ => self.trash_open = !self.trash_open,
+        }
+        if section >= 4 {
+            self.save_ui(true);
         }
         cx.notify();
     }
@@ -18976,8 +19042,16 @@ impl Workbench {
                     .id("composer")
                     .key_context(COMPOSER_CONTEXT)
                     .on_action(cx.listener(|this, _: &Send, window, cx| this.send_pressed(window, cx)))
-                    .on_action(cx.listener(|this, _: &ComposerUnderline, _, cx| this.composer.update(cx, |e, cx| e.underline(cx))))
-                    .on_action(cx.listener(|this, _: &ComposerStrike, _, cx| this.composer.update(cx, |e, cx| e.strike(cx))))
+                    .on_action(cx.listener(|this, _: &ComposerUnderline, _, cx| {
+                        if !this.composer.update(cx, |e, cx| e.underline(cx)) {
+                            cx.propagate();
+                        }
+                    }))
+                    .on_action(cx.listener(|this, _: &ComposerStrike, _, cx| {
+                        if !this.composer.update(cx, |e, cx| e.strike(cx)) {
+                            cx.propagate();
+                        }
+                    }))
                     .capture_action(cx.listener(|this, _: &gpui_component::input::Paste, _, cx| {
                         if this.paste_attachments(cx) {
                             cx.stop_propagation();
