@@ -92,6 +92,8 @@ pub struct TextViewState {
     pub(crate) find: Option<super::TextFind>,
     /// Emaki: where its headings are painted (`find.rs`).
     pub(crate) headings: Option<super::HeadingSpots>,
+    /// Emaki: where its runs of text are painted (`find.rs`).
+    pub(crate) hits: Option<super::TextHits>,
     /// Emaki: the caller's element in a block's place, and what a press
     /// on a block is handed to (`edit.rs`).
     pub(crate) edit: Option<super::EditSlot>,
@@ -175,6 +177,7 @@ impl TextViewState {
             selected_text_override: None,
             find: None,
             headings: None,
+            hits: None,
             edit: None,
             unit_click: None,
             select_all: false,

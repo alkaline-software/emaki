@@ -246,6 +246,8 @@ impl Workbench {
             used.insert(key);
             let state = canvas.states.entry(key).or_insert_with(|| cx.new(|cx| TextViewState::markdown(&words, cx))).clone();
             let (kept, face) = (kept.clone(), face.clone());
+            // Where its words are painted, for the letter a press opens it at.
+            let hits = gpui_component::text::TextHits::new();
             let draw: Rc<dyn Fn(&mut Window, &mut App) -> AnyElement> = if is_header {
                 Rc::new(move |_, cx| {
                     let theme = cx.theme();
@@ -260,18 +262,19 @@ impl Workbench {
                     div().w_full().pb(px(pad.1)).child(band).into_any_element()
                 })
             } else {
+                let hits = hits.clone();
                 Rc::new(move |_, cx| {
                     div()
                         .w_full()
                         .text_size(px(size))
                         .line_height(relative(1.6))
                         .when_some(face.clone(), |d, face| crate::fonts::Faced::faced(d, face, cx))
-                        .child(crate::transcript::md_view_piece(state.clone(), words.clone(), quarto, kept.clone(), crate::fonts::code_px(size), cx))
+                        .child(crate::transcript::md_view_piece(state.clone(), words.clone(), quarto, kept.clone(), crate::fonts::code_px(size), Some(hits.clone()), cx))
                         .into_any_element()
                 })
             };
             let out = if is_header { (pad.0, pad.0, pad.1) } else { (0., 0., 0.) };
-            pieces.push(live::Piece { first, last, key, out, draw });
+            pieces.push(live::Piece { first, last, key, out, draw, hits: (!is_header).then_some(hits) });
         }
         used.extend(fold_pieces.iter().map(|p| p.key));
         pieces.extend(fold_pieces);
@@ -333,10 +336,10 @@ impl Workbench {
                     let words = format!("![](<{}>){}", at.display(), width.map(|w| format!("{{width={w}}}")).unwrap_or_default());
                     let state = canvas.states.entry(key).or_insert_with(|| cx.new(|cx| TextViewState::markdown(&words, cx))).clone();
                     let kept = kept.clone();
-                    Rc::new(move |_, cx| div().w_full().text_size(px(size)).child(crate::transcript::md_view_piece(state.clone(), words.clone(), quarto, kept.clone(), crate::fonts::code_px(size), cx)).into_any_element())
+                    Rc::new(move |_, cx| div().w_full().text_size(px(size)).child(crate::transcript::md_view_piece(state.clone(), words.clone(), quarto, kept.clone(), crate::fonts::code_px(size), None, cx)).into_any_element())
                 }
             };
-            out.push(live::Piece { first: fold.first, last: fold.last, key, out: (0., 0., 0.), draw });
+            out.push(live::Piece { first: fold.first, last: fold.last, key, out: (0., 0., 0.), draw, hits: None });
         }
         out
     }

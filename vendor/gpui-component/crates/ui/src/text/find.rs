@@ -10,7 +10,7 @@ use std::{
     rc::Rc,
 };
 
-use gpui::{Bounds, Pixels};
+use gpui::{Bounds, Pixels, Point, SharedString, TextLayout};
 
 #[derive(Default)]
 struct Inner {
@@ -223,5 +223,65 @@ mod tests {
         assert_eq!(find.current(), 2);
         find.step(1);
         assert_eq!(find.current(), 0);
+    }
+}
+
+
+/// Where a view painted its runs of text, for the letter under a point
+/// (Emaki addition): each run's bounds, its layout and its text, in the
+/// order the document paints them, as the last whole frame painted them.
+/// The application holds one and hands it to the view
+/// (`TextView::hits`).
+#[derive(Clone, Default)]
+pub struct TextHits(Rc<HitsInner>);
+
+#[derive(Default)]
+struct HitsInner {
+    now: RefCell<Vec<(Bounds<Pixels>, TextLayout, SharedString)>>,
+    last: RefCell<Vec<(Bounds<Pixels>, TextLayout, SharedString)>>,
+}
+
+/// The letter under a point: the run of text it is in, its byte in that
+/// run, and the text of every run painted before it, a line each.
+pub struct TextAt {
+    pub text: SharedString,
+    pub index: usize,
+    pub before: String,
+}
+
+impl TextHits {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// The letter under `point`, in the window's coordinates: in the run
+    /// whose bounds hold it, else the run nearest it up or down.
+    pub fn at(&self, point: Point<Pixels>) -> Option<TextAt> {
+        let last = self.0.last.borrow();
+        let far = |b: &Bounds<Pixels>| if point.y < b.top() { b.top() - point.y } else if point.y > b.bottom() { point.y - b.bottom() } else { Pixels::ZERO };
+        let ix = last.iter().position(|(b, _, _)| b.contains(&point)).or_else(|| (0..last.len()).min_by(|a, b| far(&last[*a].0).partial_cmp(&far(&last[*b].0)).unwrap_or(std::cmp::Ordering::Equal)))?;
+        let (_, layout, text) = &last[ix];
+        let mut index = match layout.index_for_position(point) {
+            Ok(i) | Err(i) => i,
+        }
+        .min(text.len());
+        while index > 0 && !text.is_char_boundary(index) {
+            index -= 1;
+        }
+        let before = last[..ix].iter().map(|(_, _, t)| t.as_ref()).collect::<Vec<_>>().join("\n");
+        Some(TextAt { text: text.clone(), index, before })
+    }
+
+    pub(crate) fn begin_frame(&self) {
+        self.0.now.borrow_mut().clear();
+    }
+
+    pub(crate) fn painted(&self, bounds: Bounds<Pixels>, layout: TextLayout, text: SharedString) {
+        self.0.now.borrow_mut().push((bounds, layout, text));
+    }
+
+    pub(crate) fn end_frame(&self) {
+        let now = std::mem::take(&mut *self.0.now.borrow_mut());
+        *self.0.last.borrow_mut() = now;
     }
 }

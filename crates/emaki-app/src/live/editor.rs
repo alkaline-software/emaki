@@ -331,6 +331,9 @@ pub(crate) struct Piece {
     /// top: a band out to the pane's edges.
     pub out: (f32, f32, f32),
     pub draw: Rc<dyn Fn(&mut Window, &mut App) -> AnyElement>,
+    /// Where what it draws painted its words, for the letter a press
+    /// was on (`take_reach`); none where it draws no words to find.
+    pub hits: Option<gpui_component::text::TextHits>,
 }
 
 pub(crate) struct Editor {
@@ -380,8 +383,10 @@ pub(crate) struct Editor {
     /// the press became a selection, so a selection can begin on a link.
     pressed_link: Option<Target>,
     /// A shut piece just opened by a press or an arrow, and the point the
-    /// caret goes to once its lines are laid out as written (Emaki).
-    reach: Option<(usize, f32, f32, f32)>,
+    /// caret goes to once its lines are laid out as written (Emaki): its
+    /// first line, the point, how far down the drawing it was, and where
+    /// a press was in the window.
+    reach: Option<(usize, f32, f32, f32, Option<Point<Pixels>>)>,
     want_scroll: bool,
     /// The column ↑ and ↓ keep to, in pixels from the words' left.
     preferred_x: Option<f32>,
@@ -1929,7 +1934,7 @@ impl Editor {
                 Some((line, Some(top), Some(entry))) if !select && self.shut.iter().any(|(f, _, _)| *f == line) => {
                     let y = if down { top + 1. } else { top + entry.height - 1. };
                     drop(cache);
-                    self.open_piece_toward(line, x, y.max(0.), cx);
+                    self.open_piece_toward(line, x, y.max(0.), None, cx);
                     return;
                 }
                 Some((_, Some(top), Some(entry))) => {
@@ -2091,9 +2096,9 @@ impl Editor {
 
     /// A shut piece opened by a press or an arrow at a point of the page:
     /// the caret goes where that point falls once its lines are laid out
-    /// as written (`take_reach`), so nothing scrolls and the place pressed
-    /// is the place written in.
-    fn open_piece_toward(&mut self, first: usize, x: f32, y: f32, cx: &mut Context<Self>) {
+    /// as written (`take_reach`), the place pressed the place written in.
+    /// `at` is a press's place in the window.
+    fn open_piece_toward(&mut self, first: usize, x: f32, y: f32, at: Option<Point<Pixels>>, cx: &mut Context<Self>) {
         // How far down the drawing the point is, for a line as far down
         // the lines as written.
         let down = {
@@ -2104,20 +2109,62 @@ impl Editor {
         };
         self.open_piece = Some(first);
         self.sel = Sel::caret(Pos::new(first, 0));
-        self.reach = Some((first, x, y, down));
+        self.reach = Some((first, x, y, down, at));
         self.preferred_x = Some(x);
         cx.notify();
     }
 
     /// The caret put where a piece just opened was pressed, its lines now
-    /// laid out. One line (a paragraph with a formula) takes the point
-    /// itself, its words where they were. More take the line as far down
-    /// the lines as the point was down the drawing, leaving out a fence
-    /// line, which the drawing does not show (a callout's `:::`, a
-    /// header's `---`), and the place along it under the point.
-    fn take_reach(&mut self) {
-        let Some((first, x, y, down)) = self.reach.take() else { return };
-        let Some(last) = self.pieces.iter().find(|p| p.first == first).map(|p| p.last) else { return };
+    /// laid out. A press goes to the letter it was on: the words around it
+    /// in the drawing are found in the lines as written
+    /// (`drawn_in_source`), and the page scrolls so that letter stays under
+    /// the pointer. An HTML block's lines are many more than it draws, so
+    /// a line as far down the lines as the press was down the drawing
+    /// landed in its tags, and the opened block, taller, carried the words
+    /// away from the pointer. Where no words are found (a picture, an
+    /// icon), and for an arrow, the guess (`reach_guess`). Whether the
+    /// page scrolled.
+    fn take_reach(&mut self, bounds: Bounds<Pixels>) -> bool {
+        let Some((first, x, y, down, at)) = self.reach.take() else { return false };
+        let Some(piece) = self.pieces.iter().find(|p| p.first == first).cloned() else { return false };
+        let by_words = at.zip(piece.hits.as_ref()).and_then(|(at, hits)| hits.at(at)).and_then(|drawn| {
+            let lines: Vec<&str> = (first..=piece.last.min(self.doc.line_count().saturating_sub(1))).map(|l| self.doc.line(l)).collect();
+            let mut off = drawn_in_source(&lines.join("\n"), &drawn.text, drawn.index, &drawn.before)?;
+            for (n, line) in lines.iter().enumerate() {
+                if off <= line.len() {
+                    return Some(self.doc.clamp(Pos::new(first + n, off)));
+                }
+                off -= line.len() + 1;
+            }
+            None
+        });
+        let Some(p) = by_words.or_else(|| self.reach_guess(first, piece.last, x, y, down)) else { return false };
+        self.sel = Sel::caret(p);
+        if let Some((grain, _, _)) = self.drag {
+            self.drag = Some((grain, p, p));
+        }
+        let (Some(at), true) = (at, by_words.is_some()) else { return false };
+        let Some(caret) = self.caret_at(p) else { return false };
+        let dy = f32::from(at.y) - (f32::from(bounds.top()) + caret.y + caret.h / 2.);
+        let offset = self.scroll.offset();
+        // The most it scrolls, by the layout just made: the scroller's own
+        // is the last frame's, before the block opened taller.
+        let most = (self.cache.borrow().total - f32::from(self.scroll.bounds().size.height)).max(0.);
+        let to = (f32::from(offset.y) + dy).clamp(-most, 0.);
+        if (to - f32::from(offset.y)).abs() <= 0.5 {
+            return false;
+        }
+        self.scroll.set_offset(point(offset.x, px(to)));
+        true
+    }
+
+    /// The caret's place in a piece just opened when its words do not say
+    /// it. One line (a paragraph with a formula) takes the point itself,
+    /// its words where they were. More take the line as far down the lines
+    /// as the point was down the drawing, leaving out a fence line, which
+    /// the drawing does not show (a callout's `:::`, a header's `---`), and
+    /// the place along it under the point.
+    fn reach_guess(&self, first: usize, last: usize, x: f32, y: f32, down: f32) -> Option<Pos> {
         let fence = |l: usize| {
             let t = self.doc.line(l).trim_start();
             t.starts_with(":::") || t.starts_with("---") || t.starts_with("```") || t.starts_with("~~~")
@@ -2126,17 +2173,12 @@ impl Editor {
         let line = (a + (down * (b - a + 1) as f32) as usize).min(b);
         let p = {
             let cache = self.cache.borrow();
-            let (Some(top), Some(entry)) = (cache.tops.get(line).copied(), cache.entries.get(line)) else { return };
+            let (Some(top), Some(entry)) = (cache.tops.get(line).copied(), cache.entries.get(line)) else { return None };
             let y = if a == b { y.clamp(top, top + (entry.height - 1.).max(0.)) } else { top + 1. };
-            self.pos_at(x, y, &cache)
+            self.pos_at(x, y, &cache)?
         };
-        let Some(p) = p else { return };
         let p = if p.line == line { p } else { Pos::new(line, 0) };
-        let p = self.past_marker(p);
-        self.sel = Sel::caret(p);
-        if let Some((grain, _, _)) = self.drag {
-            self.drag = Some((grain, p, p));
-        }
+        Some(self.past_marker(p))
     }
 
     // -- places on the page -------------------------------------------------
@@ -2786,8 +2828,8 @@ impl Element for EditorElement {
         let moved = self.editor.update(cx, |e, _| {
             e.origin = bounds.origin;
             e.painted = true;
-            e.take_reach();
-            e.want_scroll && e.scroll_to_caret(bounds, window)
+            let reached = e.take_reach(bounds);
+            (e.want_scroll && e.scroll_to_caret(bounds, window)) || reached
         });
         // The scroller read its offset before its child was laid out, so a
         // move made here shows at the next frame, which is asked for: a
@@ -2911,7 +2953,7 @@ impl Element for EditorElement {
                         // press was (Emaki); ⇧ and a press take it whole.
                         if !ev.modifiers.shift {
                             if let Some(first) = e.shut_piece_at(p.line).map(|piece| piece.first) {
-                                e.open_piece_toward(first, x, y, cx);
+                                e.open_piece_toward(first, x, y, Some(ev.position), cx);
                                 e.drag = Some((Grain::Char, e.sel.head, e.sel.head));
                                 e.kick_blink(cx);
                                 return;
@@ -3148,9 +3190,151 @@ impl Editor {
     }
 }
 
+/// A piece's lines as they read: tags, comments, scripts and styles left
+/// out, the entities read as their letters and a run of white space as
+/// one space; and for each byte of that, the byte of `source` it came
+/// from, with the end of `source` after the last.
+fn reads_as(source: &str) -> (String, Vec<usize>) {
+    let (mut out, mut from) = (String::new(), Vec::new());
+    let push = |out: &mut String, from: &mut Vec<usize>, c: char, at: usize| {
+        out.push(c);
+        from.extend(std::iter::repeat_n(at, c.len_utf8()));
+    };
+    let mut i = 0;
+    let mut space = false;
+    while let Some(c) = source[i..].chars().next() {
+        let rest = &source[i..];
+        if rest.starts_with("<!--") {
+            i += rest.find("-->").map_or(rest.len(), |e| e + 3);
+            continue;
+        }
+        let lower = rest.get(..8).unwrap_or(rest).to_ascii_lowercase();
+        if let Some(tag) = ["<script", "<style"].into_iter().find(|t| lower.starts_with(t)) {
+            let close = format!("</{}", &tag[1..]);
+            i += rest.to_ascii_lowercase().find(&close).and_then(|e| rest[e..].find('>').map(|g| e + g + 1)).unwrap_or(rest.len());
+            continue;
+        }
+        if c == '<' && rest[1..].starts_with(|n: char| n.is_ascii_alphabetic() || n == '/' || n == '!') {
+            i += rest.find('>').map_or(rest.len(), |e| e + 1);
+            continue;
+        }
+        if c.is_whitespace() {
+            if !space && !out.is_empty() {
+                push(&mut out, &mut from, ' ', i);
+            }
+            space = true;
+            i += c.len_utf8();
+            continue;
+        }
+        space = false;
+        if c == '&' {
+            if let Some(end) = rest.get(..rest.len().min(10)).and_then(|r| r.find(';')) {
+                let name = &rest[1..end];
+                let letter = match name {
+                    "amp" => Some('&'),
+                    "lt" => Some('<'),
+                    "gt" => Some('>'),
+                    "quot" => Some('"'),
+                    "apos" => Some('\''),
+                    "nbsp" => Some(' '),
+                    _ => name.strip_prefix("#x").or_else(|| name.strip_prefix("#X")).and_then(|h| u32::from_str_radix(h, 16).ok()).or_else(|| name.strip_prefix('#').and_then(|d| d.parse().ok())).and_then(char::from_u32),
+                };
+                if let Some(letter) = letter {
+                    push(&mut out, &mut from, letter, i);
+                    i += end + 1;
+                    continue;
+                }
+            }
+        }
+        push(&mut out, &mut from, c, i);
+        i += c.len_utf8();
+    }
+    from.push(source.len());
+    (out, from)
+}
+
+/// A run of drawn words with the room the view sets around code and
+/// formulas taken out and white space read as one space; and the byte
+/// that `index` of the run is in it.
+fn plain_drawn(text: &str, index: usize) -> (String, usize) {
+    let mut out = String::new();
+    let mut at = None;
+    let mut space = false;
+    for (i, c) in text.char_indices() {
+        if i >= index && at.is_none() {
+            at = Some(out.len());
+        }
+        if c == '\u{202F}' {
+            continue;
+        }
+        if c.is_whitespace() {
+            if !space {
+                out.push(' ');
+            }
+            space = true;
+            continue;
+        }
+        space = false;
+        out.push(c);
+    }
+    let at = at.unwrap_or(out.len());
+    (out, at)
+}
+
+/// Where the letter at `index` of a drawn run of words is in the lines
+/// it was drawn from, as a byte of `source`: the words around it, fewer
+/// and fewer until they are found, as many times before it in the
+/// drawing as in the lines (`before` is every run drawn before, a line
+/// each). None when they are not there at all.
+fn drawn_in_source(source: &str, text: &str, index: usize, before: &str) -> Option<usize> {
+    let (reads, from) = reads_as(source);
+    let (run, at) = plain_drawn(text, index);
+    let (prior, _) = plain_drawn(before, before.len());
+    let chars_back = |n: usize| run[..at].char_indices().rev().nth(n.saturating_sub(1)).map_or(0, |(i, _)| i);
+    let chars_on = |n: usize| run[at..].char_indices().nth(n).map_or(run.len(), |(i, _)| at + i);
+    let word = (run[..at].rfind(' ').map_or(0, |i| i + 1), run[at..].find(' ').map_or(run.len(), |i| at + i));
+    let mut tries: Vec<(usize, usize)> = [24, 12, 6].into_iter().map(|n| (chars_back(n), chars_on(n))).collect();
+    tries.push(word);
+    for (a, b) in tries {
+        let needle = &run[a..b];
+        if needle.trim().chars().count() < 2 {
+            continue;
+        }
+        // How many times the words come before this place in the drawing.
+        let drawn_before = format!("{prior}\n{}", &run[..b]);
+        let n = drawn_before.match_indices(needle).count().saturating_sub(1);
+        let found: Vec<usize> = reads.match_indices(needle).map(|(i, _)| i).collect();
+        if let Some(start) = found.get(n).or(found.first()) {
+            return from.get(start + (at - a)).copied();
+        }
+    }
+    None
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{carry_marks, changed, find_all, Mark};
+    use super::{carry_marks, changed, drawn_in_source, find_all, Mark};
+
+    #[test]
+    fn a_letter_drawn_is_found_where_it_is_written() {
+        let html = "<div class=\"masthead\">\n <!-- Not an <h1>: a note -->\n <p class=\"name\">Pingfan Hu</p>\n <ul>\n  <li><span class=\"glyph\" aria-hidden=\"true\"></span>Greater Melbourne, Australia</li>\n  <li>R &amp; D in Melbourne</li>\n </ul>\n</div>";
+        // The "l" of "Melbourne", pressed in the first item's run.
+        let run = "Greater Melbourne, Australia";
+        let at = drawn_in_source(html, run, run.find("lbourne").unwrap(), "Pingfan Hu").unwrap();
+        assert_eq!(&html[at..at + 7], "lbourne");
+        assert!(html[..at].ends_with("Greater Me"));
+        // The second "Melbourne", after an entity, is the second one written.
+        let run2 = "R & D in Melbourne";
+        let at2 = drawn_in_source(html, run2, run2.find("bourne").unwrap(), "Pingfan Hu\nGreater Melbourne, Australia").unwrap();
+        assert!(html[..at2].ends_with("R &amp; D in Mel"), "{}", &html[..at2]);
+        // Words a comment holds are not words drawn.
+        assert!(drawn_in_source(html, "Not an", 2, "").is_none());
+        // Code's room in a drawn run is no letter of the source.
+        let md = "Run `cargo build` now.";
+        let drawn = "Run \u{202F}\u{202F}\u{202F}cargo build\u{202F}\u{202F}\u{202F} now.";
+        let at3 = drawn_in_source(md, drawn, drawn.find("build").unwrap(), "").unwrap();
+        assert_eq!(&md[at3..at3 + 5], "build");
+    }
 
     #[test]
     fn a_phrase_is_found_whatever_its_case() {

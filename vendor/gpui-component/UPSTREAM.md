@@ -373,6 +373,8 @@ upstream revision finds them.
 81. `crates/ui/src/text/inline.rs` (`request_layout`): inline code is set with no contextual forms or ligatures (`calt`, `clig`, `liga` off). gpui shapes a paragraph whole and wraps it after, so a mono face's `://` broken after the colon kept its slashes' form for after a colon, moved left under it: the next line's `//` stood out past the margin, outside its plate.
 
 82. `crates/ui/src/text/node.rs` (`attr_chip`, `AttrChip`; `render_div`'s chip and a heading's): a chip of Quarto's attributes shows their short form, the id and the classes with "…" for the rest, and a click shows them whole, wrapped, fading in; a click that selects nothing shows the short form again.
+
+83. `crates/ui/src/text/find.rs` (`TextHits`, `TextAt`), `text_view.rs` (`TextView::hits`), `state.rs`, `inline.rs` (`paint`): a view handed a `TextHits` keeps where each run of its words was painted, its layout and its text, so the application can ask which letter is under a point.
 ## Updating
 
 Check out the new upstream revision, copy the four crates over these, re-apply

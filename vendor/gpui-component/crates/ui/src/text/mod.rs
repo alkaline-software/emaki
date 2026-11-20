@@ -17,7 +17,7 @@ mod utils;
 mod window_selection;
 
 use gpui::{App, ElementId, IntoElement, RenderOnce, SharedString, Window};
-pub use find::{HeadingSpots, KeptViews, TextFind};
+pub use find::{HeadingSpots, KeptViews, TextAt, TextFind, TextHits};
 pub use inline::right_clicked_link;
 pub use edit::{EditSlot, EditUnit, UnitClick, UnitClickFn, UnitKind};
 pub use node::{LinkMark, Span};

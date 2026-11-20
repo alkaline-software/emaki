@@ -207,8 +207,8 @@ pub(crate) fn md_view_file(state: Entity<gpui_component::text::TextViewState>, t
 /// does not draw (`panels/doc_edit.rs`): drawn as the file reads, from
 /// `state`, which the file's editor keeps. It selects nothing of its
 /// own: the editor's selection takes it whole.
-pub(crate) fn md_view_piece(state: Entity<gpui_component::text::TextViewState>, text: String, quarto: Option<Dialect>, kept: gpui_component::text::KeptViews, code_px: f32, cx: &App) -> impl IntoElement {
-    md_view_in(String::new(), text, crate::fonts::inline_mono_family(cx), false, quarto, false, None, None, Some(kept), Some(state), None, Some(code_px), cx).selectable(false)
+pub(crate) fn md_view_piece(state: Entity<gpui_component::text::TextViewState>, text: String, quarto: Option<Dialect>, kept: gpui_component::text::KeptViews, code_px: f32, hits: Option<gpui_component::text::TextHits>, cx: &App) -> impl IntoElement {
+    md_view_in(String::new(), text, crate::fonts::inline_mono_family(cx), false, quarto, false, None, None, Some(kept), Some(state), None, Some(code_px), cx).selectable(false).hits(hits)
 }
 
 /// `md_view` drawn from `state`, which the caller keeps: words it can

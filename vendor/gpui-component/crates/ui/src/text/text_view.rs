@@ -76,6 +76,8 @@ pub struct TextView {
     find: Option<super::TextFind>,
     /// Emaki: where its headings are painted (`HeadingSpots`).
     headings: Option<super::HeadingSpots>,
+    /// Emaki: where its runs of text are painted (`TextHits`).
+    hits: Option<super::TextHits>,
     /// Emaki: the views kept registered while drawn from a cache
     /// (`KeptViews`).
     kept: Option<super::KeptViews>,
@@ -125,6 +127,7 @@ impl TextView {
             markdown_extensions: Arc::default(),
             find: None,
             headings: None,
+            hits: None,
             kept: None,
             edit: None,
             unit_click: None,
@@ -148,6 +151,7 @@ impl TextView {
             markdown_extensions: Arc::default(),
             find: None,
             headings: None,
+            hits: None,
             kept: None,
             edit: None,
             unit_click: None,
@@ -171,6 +175,7 @@ impl TextView {
             markdown_extensions: Arc::default(),
             find: None,
             headings: None,
+            hits: None,
             kept: None,
             edit: None,
             unit_click: None,
@@ -204,6 +209,13 @@ impl TextView {
     /// goes to one (`HeadingSpots`).
     pub fn headings(mut self, headings: Option<super::HeadingSpots>) -> Self {
         self.headings = headings;
+        self
+    }
+
+    /// Emaki: keep where its runs of text are painted, for the letter
+    /// under a point (`TextHits`).
+    pub fn hits(mut self, hits: Option<super::TextHits>) -> Self {
+        self.hits = hits;
         self
     }
 
@@ -404,6 +416,7 @@ impl Element for TextView {
             state.scrollable = self.scrollable;
             state.find = self.find.clone();
             state.headings = self.headings.clone();
+            state.hits = self.hits.clone();
             state.edit = self.edit.clone();
             state.unit_click = self.unit_click.clone();
             if state.text_view_style != self.text_view_style {
@@ -491,6 +504,10 @@ impl Element for TextView {
         if let Some(headings) = &headings {
             headings.begin_frame();
         }
+        let hits = state.read(cx).hits.clone();
+        if let Some(hits) = &hits {
+            hits.begin_frame();
+        }
         UiGlobalState::global_mut(cx)
             .text_view_state_stack
             .push(state.clone());
@@ -501,6 +518,9 @@ impl Element for TextView {
         }
         if let Some(headings) = &headings {
             headings.end_frame();
+        }
+        if let Some(hits) = &hits {
+            hits.end_frame();
         }
 
         if self.selectable {

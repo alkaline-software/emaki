@@ -637,6 +637,10 @@ impl Element for Inline {
         };
 
         let text_layout = self.styled_text.layout().clone();
+        // Emaki: where this run is, for the letter under a point.
+        if let Some(hits) = UiGlobalState::global(cx).text_view_state().and_then(|s| s.read(cx).hits.clone()) {
+            hits.painted(bounds, text_layout.clone(), self.text.clone());
+        }
         self.paint_code_chips(&text_layout, &bounds, window);
         // Emaki: words found in the view, behind the letters, as the
         // code editor marks them: the current one in the selection's
