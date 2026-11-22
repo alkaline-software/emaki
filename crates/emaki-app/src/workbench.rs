@@ -505,23 +505,36 @@ fn tab_hint_plate(n: usize, theme: &gpui_component::Theme) -> Div {
     )
 }
 
-/// Which of the pages' buttons stands for a page; none for a session's.
-fn nav_index(page: Page) -> Option<usize> {
-    match page {
-        Page::Sessions => Some(0),
-        Page::Agents => Some(1),
-        Page::New | Page::Session => None,
-    }
-}
-
-/// The width of either end of the top strip on every page: two buttons
-/// on one track, as the pages' are.
-const STRIP_END: f32 = NAV_PAD * 2. + NAV_SEG_W * 2. + NAV_GAP;
+/// The width of either end of the top strip on every page: room for two
+/// buttons, so the tabs keep one center line whatever stands there.
+const STRIP_END: f32 = 68.;
 /// A panel's button in the top strip.
 const QUIET_W: f32 = 28.;
-const NAV_SEG_W: f32 = 30.;
-const NAV_PAD: f32 = 3.;
+/// The sidebar's pair of pages, All Sessions and Agents: a segment's
+/// width, and the gap between the two.
+const NAV_SEG: f32 = 34.;
 const NAV_GAP: f32 = 2.;
+/// The band at the head of the open computer's card, and a row of the
+/// sidebar's small cards (New Session's, the pair's, the other
+/// computers'), which stand as tall as the band does between the card's
+/// edge and the line under it: the band's height holds that line, a
+/// small card's row does not.
+const SIDE_BAND_H: f32 = 36.;
+const SIDE_CARD_ROW: f32 = SIDE_BAND_H - 1.;
+/// The room between a small card's edge and its rows, at either side.
+const SIDE_CARD_PAD: f32 = 2.;
+/// The sidebar's columns, counted from a card's inner edge, the same in
+/// every card and row: the column an icon is centered in, the room
+/// before it and the gap after it. With the computer's icon (14) in it,
+/// the icon has before it what it has over and under it in the band
+/// (11), and the name starts as far after it as drawn: a letter's own
+/// side bearing is a point of that, so the gap is a point less.
+const SIDE_ICON_COL: f32 = 22.;
+const SIDE_LEAD: f32 = 7.;
+const SIDE_ICON_GAP: f32 = 6.;
+/// From a card's inner edge to where a row ends at the right (a count, a
+/// dot, an arrow): the same air as before the icon.
+const SIDE_TRAIL: f32 = 11.;
 
 fn pill_chrome(tabs: usize) -> f32 {
     PILL_LEAD + PILL_PAD + TAB_GAP * (tabs.max(1) as f32 - 1.)
@@ -615,6 +628,10 @@ const RAIL_GAP: Pixels = px(4.);
 /// The sidebar's rows: an agent or a folder, and a session under a folder.
 const SIDE_ROW_H: Pixels = px(28.);
 const SIDE_SESSION_H: Pixels = px(26.);
+/// How far a session's row stands in from its folder's: its mark begins
+/// where the folder's icon ends, and its title a step in from the
+/// folder's name.
+const SESSION_INDENT: f32 = 11.;
 pub const TITLEBAR_H: Pixels = px(48.);
 /// The move to where the new part of a conversation begins
 /// (`UnreadGlide`): the most of the way that is run and not skipped, how
@@ -1052,10 +1069,6 @@ const PLAN_BOX_H: Pixels = px(360.);
 /// The name a session begun from a folder's plus goes by until it has
 /// one of its own.
 const NEW_TITLE: &str = phrase("New Session");
-
-/// The height of the sidebar's line of New Session, All Sessions and
-/// Agents, and the side of its two square buttons.
-const NAV_H: f32 = 34.;
 
 /// The sidebar's one measure of air: between its blocks (the line of
 /// entries, the cards) and between them and its edges.
@@ -2103,9 +2116,6 @@ pub struct Workbench {
     /// began to go, the page and session showing when it came, and
     /// whether it is up.
     rail_fly: Option<(Instant, (Page, Option<String>), bool)>,
-    /// Where the new-session page was come to from: the page, and the
-    /// session when it was one. Its button pressed again goes back there.
-    new_from: Option<(Page, Option<String>)>,
     /// `EMAKI_GO=sidefit` asked for the fitted width at the next draw.
     fit_wanted: bool,
     /// The tab row's width as last laid out, each tab's width (see
@@ -2141,9 +2151,13 @@ pub struct Workbench {
     page_tab_gone: Option<Instant>,
     /// Where among the pills the page tab stands, as a drag left it.
     page_tab_at: usize,
-    /// The pages' buttons' plate moving from one page to another: from,
-    /// to, and a count that names each move (`page_nav`).
-    nav_anim: Option<(usize, usize, u32)>,
+    /// The plate of the sidebar's pair of pages moving: the segment it
+    /// was on and the one it goes to (none for a session's page or the
+    /// new-session page, where it fades), a count that names each move,
+    /// and when it began (`nav_pair`).
+    nav_anim: Option<(Option<usize>, Option<usize>, u32, Instant)>,
+    /// The segment the pair's plate stood on at the last draw.
+    nav_was: Option<Option<usize>>,
     /// The session shown last, which the page tab closing goes back to.
     last_session: Option<String>,
     tab_plate: TabPlate,
@@ -2965,8 +2979,8 @@ impl Workbench {
         // Around the words: the card's margin, outline and padding on
         // both sides (26), then each row's own indent, icon, gaps, dot
         // and count.
-        const FOLDER_CHROME: f32 = 26. + 20. + 22. + 10. + 17. + 10. + 22.;
-        const SESSION_CHROME: f32 = 26. + 18. + 20. + 18. + 8. + 15.;
+        const FOLDER_CHROME: f32 = 26. + (SIDE_LEAD - SIDE_INSET) + (SIDE_TRAIL - SIDE_INSET) + SIDE_ICON_COL + SIDE_ICON_GAP + 17. + 10. + 22.;
+        const SESSION_CHROME: f32 = 26. + SESSION_INDENT + 10. + (SIDE_TRAIL - SIDE_INSET) + 18. + 8. + 15.;
         let mut folders: Vec<(String, Vec<&SessionRef>)> = Vec::new();
         for r in &self.refs {
             let p = r.project();
@@ -3167,7 +3181,9 @@ impl Workbench {
             .w(self.rail_w())
             .opacity(shown)
             .child(rule(top - px(7.)))
-            .child(entry("rail-new", plus, crate::shortcuts::keyed(t("New Session (⌘N)"), "new-session").into(), page == Page::New, 0., Box::new(|this, window, cx| this.new_toggle(window, cx))))
+            // New Session is never lit, as in the sidebar: only the
+            // pointer on it lights it.
+            .child(entry("rail-new", plus, crate::shortcuts::keyed(t("New Session (⌘N)"), "new-session").into(), false, 0., Box::new(|this, window, cx| this.show_new(None, window, cx))))
             .child(entry("rail-sessions", icon("icons/scroll.svg", sessions), crate::shortcuts::keyed(t("All Sessions (⌘L)"), "all-sessions").into(), sessions, 1., Box::new(|this, _, cx| this.show_sessions(Scope::All, cx))))
             .child(entry("rail-agents", icon("icons/sparkles.svg", page == Page::Agents), crate::shortcuts::keyed(t("Agents (⌘E)"), "agents").into(), page == Page::Agents, 2., Box::new(|this, _, cx| this.show_agents(None, cx))))
             .child(rule(top + (RAIL_ENTRY + RAIL_GAP) * 3. + px(3.)))
@@ -4975,7 +4991,6 @@ impl Workbench {
             side_anim: None,
             peek_anim: None,
             rail_fly: None,
-            new_from: None,
             stashed: HashMap::new(),
             lightbox_region: Rc::new(Cell::new(Bounds::default())),
             tab_views: HashMap::new(),
@@ -4992,6 +5007,7 @@ impl Workbench {
             page_tab_gone: None,
             page_tab_at: 0,
             nav_anim: None,
+            nav_was: None,
             page_last: if page == Page::Agents { Page::Agents } else { Page::Sessions },
             page_swap: None,
             last_session: None,
@@ -7126,14 +7142,13 @@ impl Workbench {
         }
     }
 
-    /// The pages' buttons' plate moves from the page that is up to `to`
-    /// when both are pages; from a session's page it is simply there.
-    pub(crate) fn note_nav(&mut self, to: Page) {
-        if let (Some(a), Some(b)) = (nav_index(self.page), nav_index(to)) {
-            if a != b {
-                let serial = self.nav_anim.map(|(_, _, n)| n + 1).unwrap_or(1);
-                self.nav_anim = Some((a, b, serial));
-            }
+    /// Which segment of the sidebar's pair of pages is lit: All Sessions
+    /// over every agent, or Agents; none on any other page.
+    fn nav_on(&self) -> Option<usize> {
+        match self.page {
+            Page::Sessions if self.scope == Scope::All => Some(0),
+            Page::Agents => Some(1),
+            _ => None,
         }
     }
 
@@ -7337,7 +7352,6 @@ impl Workbench {
             self.page_open[section] = true;
         }
         self.sessions_goto = folder;
-        self.note_nav(Page::Sessions);
         self.page = Page::Sessions;
         self.show_page_tab(Page::Sessions);
         self.sidebar_peek = false;
@@ -7630,9 +7644,6 @@ impl Workbench {
     }
 
     fn show_new(&mut self, cwd: Option<String>, window: &mut Window, cx: &mut Context<Self>) {
-        if self.page != Page::New {
-            self.new_from = Some((self.page, self.selected_ref().filter(|_| self.page == Page::Session).map(key_of)));
-        }
         self.page = Page::New;
         self.selected = None;
         self.sidebar_peek = false;
@@ -7644,30 +7655,6 @@ impl Workbench {
         }
         self.focus_composer(window, cx);
         cx.notify();
-    }
-
-    /// New Session's button, in the sidebar and in the rail: the
-    /// new-session page, or, pressed on it, back to where it was come to
-    /// from, the session or the page; with that gone, the session shown
-    /// last.
-    fn new_toggle(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if self.page != Page::New {
-            return self.show_new(None, window, cx);
-        }
-        match self.new_from.take() {
-            Some((Page::Session, Some(key))) if self.tabs.contains(&key) => self.open_session(&key, cx),
-            Some((page @ (Page::Sessions | Page::Agents), _)) => {
-                self.note_nav(page);
-                self.page = page;
-                self.save_ui(true);
-                cx.notify();
-            }
-            _ => {
-                if let Some(key) = self.last_session.clone().filter(|k| self.tabs.contains(k)).or_else(|| self.tabs.first().cloned()) {
-                    self.open_session(&key, cx);
-                }
-            }
-        }
     }
 
     // -- settings ----------------------------------------------------------
@@ -12199,7 +12186,6 @@ impl Workbench {
         // The Projects card: a well in the frame, a little off its ground.
         let card_bg = if cx.theme().mode.is_dark() { cx.theme().background.opacity(0.55) } else { theme.foreground.opacity(0.045) };
         let page = self.page;
-        let scope = self.scope.clone();
 
         // The app's own icon, the one in the Dock, and its name in a light,
         // elegant sans at regular weight (`fonts::wordmark_family`). The PNG keeps Apple's margin
@@ -12229,59 +12215,45 @@ impl Workbench {
         // on the traffic lights as they are. No line under it: the
         // content's card is what the sidebar ends against.
         let header = Self::drag_region(h_flex().h(TITLEBAR_H).flex_shrink_0().pt(px(2.) + FRAME).pr(px(16.)).justify_end().items_center().child(brand), cx);
-        // New Session, All Sessions and Agents on one line, three buttons
-        // drawn as the card under them is, on its ground with its edge:
-        // New Session takes the room, its plus in the accent; the other
-        // two are square, their names and keys on the hover. The page
-        // that shows is lit.
-        let sessions_active = page == Page::Sessions && scope == Scope::All;
+        // New Session and the pair of pages on one line, each drawn as
+        // the card of the other computers at the sidebar's foot is: the
+        // card's ground, edge and corners, its inset, and inside it a row
+        // as that card's rows are (their height, padding, icon, type and
+        // hover), as tall as the put-away buttons. New Session's plus is
+        // on a disc of the accent. The line stands at the sidebar's gutter, so its two ends
+        // are the cards' edges under it. New Session is never lit, on
+        // whatever page: lit at rest it was the brightest thing in the
+        // sidebar. Its hover's label is there only while the keys are not
+        // drawn: with them, it said again what the button shows.
+        let keys_shown = self.sidebar_w >= px(280.);
         let new_row = h_flex()
             .id("nav-new")
             .flex_1()
             .min_w_0()
-            .h(px(NAV_H))
-            .pl(px(7.))
-            .pr(px(10.))
-            .gap(px(8.))
-            .rounded(px(9.))
+            .h(px(SIDE_CARD_ROW))
+            // The sidebar's columns, inside the card's padding.
+            .pl(px(SIDE_LEAD - SIDE_CARD_PAD))
+            .pr(px(SIDE_TRAIL - SIDE_CARD_PAD))
+            .gap(px(SIDE_ICON_GAP))
+            .text_size(px(12.5))
+            .text_color(theme.muted_foreground)
             .cursor_pointer()
-            .border_1()
-            .border_color(theme.sidebar_border)
-            .bg(if page == Page::New { theme.sidebar_accent } else { card_bg })
-            .hover(|s| s.bg(theme.sidebar_accent))
+            .relative()
+            .group("nav-new")
+            .child(crate::look::row_plate(7., (false, false)).id("nav-new-plate").group_hover("nav-new", |s| s.bg(theme.sidebar_accent.opacity(0.6))).group_active("nav-new", |s| s.bg(theme.sidebar_accent)))
+            .hover(|s| s.text_color(theme.foreground))
             // Under the button: over it, the hover lay on the wordmark.
-            .managed_tooltip_at(Placement::Bottom, |window, cx| crate::workbench::tip(crate::shortcuts::keyed(t("New Session (⌘N)"), "new-session"), window, cx))
-            .on_click(cx.listener(|this, _, window, cx| this.new_toggle(window, cx)))
-            .child(div().size(px(20.)).flex_shrink_0().rounded_full().bg(theme.primary).flex().items_center().justify_center().child(Icon::new(IconName::Plus).with_size(px(12.)).text_color(theme.primary_foreground)))
-            .child(div().flex_1().min_w_0().truncate().text_size(px(13.)).font_weight(FontWeight::MEDIUM).child(t(NEW_TITLE)))
-            // The keys, while the pill has the room for them.
-            .when(self.sidebar_w >= px(280.), |d| d.child(div().flex_shrink_0().child(kbd_hint(&crate::shortcuts::signs("new-session"), &theme))));
-        let nav = |id: &'static str, icon: &'static str, tip: String, active: bool, cx: &mut Context<Self>, on: Box<dyn Fn(&mut Self, &mut Window, &mut Context<Self>)>| {
-            let theme = Self::shell_theme(cx);
-            div()
-                .id(id)
-                .size(px(NAV_H))
-                .flex_shrink_0()
-                .rounded(px(9.))
-                .flex()
-                .items_center()
-                .justify_center()
-                .cursor_pointer()
-                .border_1()
-                .border_color(theme.sidebar_border)
-                .bg(if active { theme.sidebar_accent } else { card_bg })
-                .hover(|s| s.bg(theme.sidebar_accent))
-                .managed_tooltip_at(Placement::Bottom, move |window, cx| crate::workbench::tip(tip.clone(), window, cx))
-                .on_click(cx.listener(move |this, _, window, cx| on(this, window, cx)))
-                .child(Icon::default().path(icon).with_size(px(16.)).text_color(if active { theme.foreground } else { theme.muted_foreground }))
-        };
+            .when(!keys_shown, |d| d.managed_tooltip_at(Placement::Bottom, |window, cx| crate::workbench::tip(crate::shortcuts::keyed(t("New Session (⌘N)"), "new-session"), window, cx)))
+            .on_click(cx.listener(|this, _, window, cx| this.show_new(None, window, cx)))
+            .child(div().w(px(SIDE_ICON_COL)).flex_shrink_0().flex().justify_center().child(div().size(px(18.)).rounded_full().bg(theme.primary).flex().items_center().justify_center().child(Icon::new(IconName::Plus).with_size(px(11.)).text_color(theme.primary_foreground))))
+            .child(div().flex_1().min_w_0().truncate().child(t(NEW_TITLE)))
+            .when(keys_shown, |d| d.child(div().flex_shrink_0().child(kbd_hint(&crate::shortcuts::signs("new-session"), &theme))));
         let top = h_flex()
             .px(px(SIDE_GUTTER))
             .pt(px(SIDE_GUTTER))
-            .gap(px(6.))
-            .child(new_row)
-            .child(nav("nav-sessions", "icons/scroll.svg", crate::shortcuts::keyed(t("All Sessions (⌘L)"), "all-sessions"), sessions_active, cx, Box::new(|this, _, cx| this.show_sessions(Scope::All, cx))))
-            .child(nav("nav-agents", "icons/sparkles.svg", crate::shortcuts::keyed(t("Agents (⌘E)"), "agents"), page == Page::Agents, cx, Box::new(|this, _, cx| this.show_agents(None, cx))));
+            .gap(px(SIDE_GUTTER))
+            .child(h_flex().flex_1().min_w_0().px(px(SIDE_CARD_PAD)).rounded(px(10.)).border_1().border_color(theme.sidebar_border).bg(card_bg).child(new_row))
+            .child(self.nav_pair(card_bg, cx));
 
         // The rows sit in a column of their own inside the scroller. As
         // the scroller's children they were flex items of a column too
@@ -12438,8 +12410,10 @@ impl Workbench {
                 h_flex()
                     .id(SharedString::from(format!("folder-{p}")))
                     .h(SIDE_ROW_H)
-                    .px(px(10.))
-                    .gap(px(10.))
+                    // The sidebar's columns, inside the card's inset.
+                    .pl(px(SIDE_LEAD - SIDE_INSET))
+                    .pr(px(SIDE_TRAIL - SIDE_INSET))
+                    .gap(px(SIDE_ICON_GAP))
                     .cursor_pointer()
                     // One of the projects chosen together is lit, in the
                     // accent as a chosen file is, and joined to the lit
@@ -12503,7 +12477,7 @@ impl Workbench {
                         let (rows, name) = (self.side_rows_at.clone(), p.clone());
                         canvas(move |bounds, _, _| rows.borrow_mut().push((name, bounds, list_kind)), |_, _, _, _| {}).absolute().inset_0()
                     })
-                    .child(div().w(px(22.)).flex().justify_center().child(Icon::new(if open { IconName::FolderOpen } else { IconName::Folder }).with_size(px(15.)).text_color(tint)))
+                    .child(div().w(px(SIDE_ICON_COL)).flex().justify_center().child(Icon::new(if open { IconName::FolderOpen } else { IconName::Folder }).with_size(px(15.)).text_color(tint)))
                     .child(div().flex_1().min_w_0().truncate().text_size(px(13.)).child(self.label(entry_base(&p))))
                     // The count, and in its place under the pointer a
                     // plus: a new session in this folder. Both are
@@ -12611,8 +12585,9 @@ impl Workbench {
                         let row = h_flex()
                             .h(SIDE_SESSION_H)
                             .flex_shrink_0()
-                            .ml(px(18.))
-                            .px(px(10.))
+                            .ml(px(SESSION_INDENT))
+                            .pl(px(10.))
+                            .pr(px(SIDE_TRAIL - SIDE_INSET))
                             .gap(px(8.))
                             .child(div().w(px(18.)).flex().justify_center().child(agent_glyph(g.row.agent, px(13.), theme.muted_foreground.opacity(0.75), false)))
                             .child(div().flex_1().min_w_0().truncate().text_size(px(13.)).text_color(theme.sidebar_foreground).child(g.row.title.clone()));
@@ -12667,8 +12642,9 @@ impl Workbench {
                         .children(mark)
                         .h(SIDE_SESSION_H)
                         .flex_shrink_0()
-                        .ml(px(18.))
-                        .px(px(10.))
+                        .ml(px(SESSION_INDENT))
+                        .pl(px(10.))
+                        .pr(px(SIDE_TRAIL - SIDE_INSET))
                         .gap(px(8.))
                         .cursor_pointer()
                         // Where the row is, for a rectangle dragged over it.
@@ -12746,7 +12722,8 @@ impl Workbench {
                         .id(SharedString::from(format!("folder-more-{p}")))
                         .h(SIDE_SESSION_H)
                         .flex_shrink_0()
-                        .ml(px(18.))
+                        .ml(px(SESSION_INDENT))
+                        // Under the sessions' titles.
                         .pl(px(36.))
                         .cursor_pointer()
                         .text_size(px(12.))
@@ -12840,13 +12817,14 @@ impl Workbench {
                         .id(SharedString::from(format!("trash-{key}")))
                         .h(SIDE_SESSION_H)
                         .flex_shrink_0()
-                        .px(px(10.))
-                        .gap(px(10.))
+                        .pl(px(SIDE_LEAD - SIDE_INSET))
+                        .pr(px(SIDE_TRAIL - SIDE_INSET))
+                        .gap(px(SIDE_ICON_GAP))
                         .relative()
                         .group(group.clone())
                         .child(crate::look::row_plate(7., (false, false)).group_hover(group.clone(), |s| s.bg(theme.sidebar_accent.opacity(0.6))))
                         .on_mouse_down(MouseButton::Right, cx.listener(move |this, ev: &MouseDownEvent, _, cx| this.trash_menu(Some(&menu_key), ev.position, cx)))
-                        .child(div().w(px(22.)).flex().justify_center().child(agent_glyph(row.agent, px(13.), theme.muted_foreground.opacity(0.75), false)))
+                        .child(div().w(px(SIDE_ICON_COL)).flex().justify_center().child(agent_glyph(row.agent, px(13.), theme.muted_foreground.opacity(0.75), false)))
                         .child(div().flex_1().min_w_0().truncate().text_size(px(13.)).text_color(theme.sidebar_foreground).child(row.title.clone()))
                         .children(days.map(|days| {
                             div()
@@ -12938,7 +12916,9 @@ impl Workbench {
         let gear_dot = self.presence("gear-dot", update_waiting, cx);
         let footer = h_flex()
             .flex_shrink_0()
-            .px(px(14.))
+            // The picture's middle on the middle of the cards' icons.
+            .pl(px(SIDE_GUTTER + 1. + SIDE_LEAD + SIDE_ICON_COL / 2. - 14.))
+            .pr(px(14.))
             .py(px(10.))
             .gap(px(10.))
             .items_center()
@@ -13168,9 +13148,10 @@ impl Workbench {
         let archived = button("put-archived", 0, cx)
             .flex_1()
             .min_w_0()
-            .px(px(10.))
-            .gap(px(10.))
-            .child(div().w(px(22.)).flex_shrink_0().flex().justify_center().child(Icon::default().path("icons/archive.svg").with_size(px(14.)).text_color(ink(open[0]))))
+            .pl(px(SIDE_LEAD - SIDE_INSET))
+            .pr(px(10.))
+            .gap(px(SIDE_ICON_GAP))
+            .child(div().w(px(SIDE_ICON_COL)).flex_shrink_0().flex().justify_center().child(Icon::default().path("icons/archive.svg").with_size(px(14.)).text_color(ink(open[0]))))
             .child(div().flex_1().min_w_0().truncate().text_size(px(12.5)).text_color(ink(open[0])).child(t("Archived")))
             .when(counts[0] > 0, |d| d.child(count(counts[0], open[0])));
         // The others: square, and wide enough for their count with
@@ -13459,10 +13440,13 @@ impl Workbench {
         let (open_place, open_name) = places[at].clone();
         // The band: what the projects under it belong to. Nothing to press.
         let band = h_flex()
-            .h(px(36.))
+            .h(px(SIDE_BAND_H))
             .flex_shrink_0()
-            .px(px(14.))
-            .gap(px(10.))
+            // The sidebar's columns. The computer's icon is their
+            // measure: the air before it is the air over and under it.
+            .pl(px(SIDE_LEAD))
+            .pr(px(SIDE_TRAIL))
+            .gap(px(SIDE_ICON_GAP))
             .items_center()
             // Round at the card's corners, inside its edge: gpui cuts
             // what a card holds at its box, not its curve, and the tint
@@ -13476,7 +13460,7 @@ impl Workbench {
             .text_color(theme.foreground)
             // On the projects' columns: the mark over their folders, the
             // name over theirs.
-            .child(div().w(px(22.)).flex().justify_center().child(Icon::default().path(if open_place.is_some() { REMOTE_ICON } else { "icons/device-desktop.svg" }).with_size(px(14.)).text_color(theme.muted_foreground)))
+            .child(div().w(px(SIDE_ICON_COL)).flex().justify_center().child(Icon::default().path(if open_place.is_some() { REMOTE_ICON } else { "icons/device-desktop.svg" }).with_size(px(14.)).text_color(theme.muted_foreground)))
             .child(div().flex_1().min_w_0().truncate().child(open_name))
             // The network it goes over, its address on the hover.
             .children(open_place.as_deref().and_then(emaki_core::remote::find).filter(|d| !d.off).map(|d| {
@@ -13542,10 +13526,11 @@ impl Workbench {
             };
             h_flex()
                 .id(SharedString::from(format!("side-place-{i}")))
-                .h(px(32.))
+                .h(px(SIDE_CARD_ROW))
                 .flex_shrink_0()
-                .px(px(10.))
-                .gap(px(10.))
+                .pl(px(SIDE_LEAD - SIDE_CARD_PAD))
+                .pr(px(SIDE_TRAIL - SIDE_CARD_PAD))
+                .gap(px(SIDE_ICON_GAP))
                 .text_size(px(12.5))
                 .text_color(theme.muted_foreground)
                 .cursor_pointer()
@@ -13561,7 +13546,7 @@ impl Workbench {
                         this.side_place_go(to.clone(), cx);
                     }
                 }))
-                .child(div().w(px(22.)).flex().justify_center().child(Icon::default().path(icon).with_size(px(14.))))
+                .child(div().w(px(SIDE_ICON_COL)).flex().justify_center().child(Icon::default().path(icon).with_size(px(14.))))
                 .child(div().flex_1().min_w_0().truncate().child(name.clone()))
                 .children(p.as_deref().filter(|_| !add).map(|id| dot(i, id)))
                 .child(match add {
@@ -13576,7 +13561,7 @@ impl Workbench {
                 .child(d)
                 .with_animation(ElementId::Name(key.into()), Animation::new(FOLD_ANIM).with_easing(ease_out_quint()), move |d, t| {
                     let k = if coming { t } else { 1. - t };
-                    d.h(px(32. * k)).opacity(k)
+                    d.h(px(SIDE_CARD_ROW * k)).opacity(k)
                 })
                 .into_any_element()
         };
@@ -13593,7 +13578,7 @@ impl Workbench {
                 }
             })
             .collect();
-        let rest = v_flex().mx(px(SIDE_GUTTER)).mt(px(SIDE_GUTTER)).mb(px(SIDE_GUTTER)).p(px(SIDE_INSET)).flex_shrink_0().rounded(px(10.)).border_1().border_color(theme.sidebar_border).bg(card_bg).children(others);
+        let rest = v_flex().mx(px(SIDE_GUTTER)).mt(px(SIDE_GUTTER)).mb(px(SIDE_GUTTER)).px(px(SIDE_CARD_PAD)).flex_shrink_0().rounded(px(10.)).border_1().border_color(theme.sidebar_border).bg(card_bg).children(others);
         v_flex().flex_1().min_h_0().child(open).child(rest).into_any_element()
     }
 
@@ -14966,10 +14951,9 @@ impl Workbench {
             )
     }
 
-    /// The strip along the top of a page that is not a session's: room
-    /// for the traffic lights when the sidebar is hidden, the pages'
-    /// buttons where a session has the files and outline ones, the tabs,
-    /// actions on the right.
+    /// The strip along the top of a page that is not a session's: the
+    /// tabs, actions on the right. The way between All Sessions and
+    /// Agents is the sidebar's pair (`nav_pair`), not a second one here.
     pub(crate) fn render_topbar(&self, title: String, right: Vec<AnyElement>, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = cx.theme().clone();
         // The new-session page is the whole card, tabs and all.
@@ -14981,7 +14965,7 @@ impl Workbench {
         } else {
             self.render_tabs(cx)
         };
-        self.render_topbar_ends(vec![self.page_nav(cx)], center, right, cx)
+        self.render_topbar_ends(Vec::new(), center, right, cx)
     }
 
     /// One tab per open session in the top strip: the agent's mark (turning
@@ -15298,60 +15282,79 @@ impl Workbench {
         if self.page_last == Page::Agents { t("Agents") } else { t("All Sessions") }
     }
 
-    /// The pages' own buttons, where a session's page has the files and
-    /// outline ones: All Sessions and Agents, as one control whose plate
-    /// slides to the page gone to. A press goes there in the page tab, as
-    /// the sidebar's entries do.
-    fn page_nav(&self, cx: &mut Context<Self>) -> AnyElement {
-        let theme = cx.theme().clone();
-        let dark = theme.mode.is_dark();
-        let track_bg = if dark { theme.tab_bar_segmented } else { theme.muted };
-        let plate_bg = if dark { theme.secondary_active } else { theme.popover };
-        let seg_h = 24.;
-        let on = nav_index(self.page);
-        let x_of = |i: usize| NAV_PAD + i as f32 * (NAV_SEG_W + NAV_GAP);
-        let (from, to, serial) = self.nav_anim.filter(|(_, to, _)| Some(*to) == on).unwrap_or((on.unwrap_or(0), on.unwrap_or(0), 0));
-        let plate = on.map(|_| {
-            let (a, b) = (x_of(from), x_of(to));
-            div().absolute().top(px(NAV_PAD)).w(px(NAV_SEG_W)).h(px(seg_h)).rounded(px(7.)).bg(plate_bg).shadow_sm().with_animation(
-                ElementId::Name(format!("page-nav-plate-{serial}").into()),
-                Animation::new(TAB_ANIM).with_easing(ease_out_quint()),
-                move |d, t| d.left(px(a + (b - a) * t)),
-            )
-        });
-        let segment = |i: usize, id: &'static str, icon: Icon, tip: String, cx: &mut Context<Self>| {
+    /// All Sessions and Agents in the sidebar, as one control whose plate
+    /// is on the page that shows, drawn as New Session is: the card of the
+    /// other computers, with a square row a page inside it, its icon as
+    /// that card's rows have theirs. The plate is that card's lit row; it
+    /// slides from one page to the other, and fades in from a session's
+    /// page or the new-session page and out to one. A segment's name and
+    /// keys are its hover's label, since it shows an icon alone.
+    fn nav_pair(&self, card_bg: Hsla, cx: &mut Context<Self>) -> AnyElement {
+        let theme = Self::shell_theme(cx);
+        let (lit, hover) = (theme.sidebar_accent, theme.sidebar_accent.opacity(0.6));
+        let (fg, muted) = (theme.foreground, theme.muted_foreground);
+        let on = self.nav_on();
+        let x_of = |i: usize| i as f32 * (NAV_SEG + NAV_GAP);
+        // The lit plate is a row's plate (`look::row_plate`), a little
+        // in from the row's top and foot.
+        let plate = |x: f32| div().absolute().top(px(crate::look::ROW_BREATH)).left(px(x)).w(px(NAV_SEG)).h(px(SIDE_CARD_ROW - 2. * crate::look::ROW_BREATH)).rounded(px(7.)).bg(lit);
+        // The move under way, while it is; then the plate stands still,
+        // or is gone with no page of the two showing.
+        let plate = match self.nav_anim.filter(|(_, to, _, at)| *to == on && at.elapsed() < TAB_ANIM) {
+            Some((from, to, serial, _)) => {
+                let (a, b) = (from.or(to).map(x_of).unwrap_or(0.), to.or(from).map(x_of).unwrap_or(0.));
+                let (o_a, o_b) = (if from.is_some() { 1. } else { 0. }, if to.is_some() { 1. } else { 0. });
+                Some(
+                    plate(a)
+                        .with_animation(ElementId::Name(format!("nav-plate-{serial}").into()), Animation::new(TAB_ANIM).with_easing(ease_out_quint()), move |d, t| {
+                            d.left(px(a + (b - a) * t)).opacity(o_a + (o_b - o_a) * t)
+                        })
+                        .into_any_element(),
+                )
+            }
+            None => on.map(|i| plate(x_of(i)).into_any_element()),
+        };
+        let segment = |i: usize, id: &'static str, icon: &'static str, tip: String, cx: &mut Context<Self>| {
             let active = on == Some(i);
+            let group = SharedString::from(format!("{id}-row"));
             h_flex()
                 .id(id)
-                .w(px(NAV_SEG_W))
-                .h(px(seg_h))
+                .w(px(NAV_SEG))
+                .h(px(SIDE_CARD_ROW))
                 .flex_shrink_0()
                 .items_center()
                 .justify_center()
-                .rounded(px(7.))
+                .relative()
+                .group(group.clone())
                 .cursor_pointer()
-                .text_color(if active { theme.foreground } else { theme.muted_foreground })
+                .text_color(if active { fg } else { muted })
+                .when(!active, |d| d.child(crate::look::row_plate(7., (false, false)).group_hover(group.clone(), move |s| s.bg(hover))))
                 // Set on the active one too, for gpui's sake: see
                 // `panel_buttons`.
-                .hover(|s| s.text_color(theme.foreground))
-                .managed_tooltip(move |window, cx| crate::workbench::tip(tip.clone(), window, cx))
-                .on_mouse_down(MouseButton::Left, cx.listener(|this, _, _, _| this.press_taken = true))
+                .hover(move |s| s.text_color(fg))
+                // Under the button: over it, the hover lay on the wordmark.
+                .managed_tooltip_at(Placement::Bottom, move |window, cx| crate::workbench::tip(tip.clone(), window, cx))
                 .on_click(cx.listener(move |this, _, _, cx| match i {
                     0 => this.show_sessions(Scope::All, cx),
                     _ => this.show_agents(None, cx),
                 }))
-                .child(icon.with_size(px(15.)))
+                .child(Icon::default().path(icon).with_size(px(14.)))
         };
         h_flex()
-            .relative()
             .flex_shrink_0()
-            .p(px(NAV_PAD))
-            .gap(px(NAV_GAP))
-            .rounded(px(9.))
-            .bg(track_bg)
-            .children(plate)
-            .child(segment(0, "page-nav-sessions", Icon::default().path("icons/scroll.svg"), format!("{} ({})", t("All Sessions"), crate::shortcuts::signs("all-sessions")), cx))
-            .child(segment(1, "page-nav-agents", Icon::default().path("icons/sparkles.svg"), format!("{} ({})", t("Agents"), crate::shortcuts::signs("agents")), cx))
+            .px(px(SIDE_CARD_PAD))
+            .rounded(px(10.))
+            .border_1()
+            .border_color(theme.sidebar_border)
+            .bg(card_bg)
+            .child(
+                h_flex()
+                    .relative()
+                    .gap(px(NAV_GAP))
+                    .children(plate)
+                    .child(segment(0, "nav-sessions", "icons/scroll.svg", crate::shortcuts::keyed(t("All Sessions (⌘L)"), "all-sessions"), cx))
+                    .child(segment(1, "nav-agents", "icons/sparkles.svg", crate::shortcuts::keyed(t("Agents (⌘E)"), "agents"), cx)),
+            )
             .into_any_element()
     }
 
@@ -21283,6 +21286,16 @@ impl Render for Workbench {
         // button, the key, a window dragged narrower or wider, a panel
         // that needed its room. Not under a drag of its own edge, where
         // it is the pointer's, and not at the first draw.
+        // All Sessions and Agents in the sidebar: their plate moves whenever the page
+        // that shows does, whoever changed it.
+        let nav = self.nav_on();
+        if self.nav_was != Some(nav) {
+            if let Some(was) = self.nav_was {
+                let serial = self.nav_anim.map(|(_, _, n, _)| n + 1).unwrap_or(1);
+                self.nav_anim = Some((was, nav, serial, Instant::now()));
+            }
+            self.nav_was = Some(nav);
+        }
         let beside = self.sidebar_open && !self.narrow;
         if self.side_was != Some(beside) {
             if self.side_was.is_some() && !self.side_drag {

@@ -112,7 +112,6 @@ impl Workbench {
             self.agents_page_scroll.set_offset(point(px(0.), px(0.)));
         }
         self.agent_open = agent;
-        self.note_nav(Page::Agents);
         self.page = Page::Agents;
         self.show_page_tab(Page::Agents);
         self.sidebar_peek = false;
