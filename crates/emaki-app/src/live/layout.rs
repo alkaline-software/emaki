@@ -275,6 +275,9 @@ pub(crate) struct Grid {
     pub room: f32,
     /// How far it is scrolled: what of its left is out of sight.
     pub slide: Cell<f32>,
+    /// Which grid this is, of all a layout has made: a row laid out on it
+    /// is kept for as long as its table keeps this one (`make_grids`).
+    pub serial: u64,
 }
 
 impl Grid {
@@ -302,12 +305,16 @@ pub(crate) struct TableRow {
     pub grid: Rc<Grid>,
     /// Whether this is the table's head.
     pub head: bool,
-    /// Each cell's words, and where they stand in the line.
-    pub cells: Vec<Flow>,
+    /// Each cell's words, and where they stand in the line. Shared with
+    /// the row as it was on another grid, where its column is as wide.
+    pub cells: Vec<Rc<Flow>>,
     pub spots: Vec<Range<usize>>,
     pub height: f32,
     pub inset: f32,
     pub cell_y: f32,
+    /// The key of what the row is made from but its grid: a row with
+    /// this one's is this row at other widths (`Reader::table_row`).
+    pub made_of: u64,
 }
 
 impl TableRow {
@@ -381,6 +388,12 @@ pub(crate) struct Cache {
     pub highlighters: HashMap<String, gpui_component::highlighter::SyntaxHighlighter>,
     /// Each table's grid, by its first line, with the key it was made for.
     pub grids: HashMap<usize, (u64, Rc<Grid>)>,
+    /// How many grids have been made, which numbers the next.
+    pub grid_serial: u64,
+    /// What each cell of a table's row asks with no caret near, by the
+    /// key of what the row is made from (`Reader::row_asks`): its longest
+    /// line and its longest run that cannot break.
+    pub asks: HashMap<u64, Rc<Vec<(f32, f32)>>>,
 }
 
 /// The narrow no-break space set around code among words, as the reading
@@ -600,6 +613,10 @@ impl<'a> Reader<'a> {
         }
 
         cache.read = Some(read);
+        // What a cell asks goes by the faces and sizes, not by the width.
+        if cache.look_key != look_key {
+            cache.asks.clear();
+        }
         if cache.width != width || cache.look_key != look_key {
             cache.entries.clear();
             cache.width = width;
@@ -611,7 +628,7 @@ impl<'a> Reader<'a> {
         let moved: HashMap<u64, (f32, Rc<Row>)> = if cache.entries.len() != n { cache.entries.iter().map(|e| (e.key, (e.height, e.row.clone()))).collect() } else { HashMap::new() };
         cache.entries.truncate(n);
         self.color_code(cache);
-        self.make_grids(&mut cache.grids, width, window);
+        self.make_grids(cache, width, window);
         let mut tops = Vec::with_capacity(n);
         let mut y = 0.;
         for line in 0..n {
@@ -657,9 +674,16 @@ impl<'a> Reader<'a> {
                     local(r).hash(&mut h);
                 }
             }
+            // A table's row, apart from its grid.
+            let mut made_of = 0;
             if let LineKind::TableFirst(t) | LineKind::TableRow(t) = info.kind {
-                let first = self.analysis.tables[t].first;
-                cache.grids.get(&first).map(|(k, _)| *k).hash(&mut h);
+                // The grid it is laid out on, not the key of the table's
+                // words: by that, a letter typed in one cell laid out
+                // every row of its table again, their columns as before.
+                let table = &self.analysis.tables[t];
+                table.aligns.iter().for_each(|a| std::mem::discriminant(a).hash(&mut h));
+                made_of = h.clone().finish();
+                cache.grids.get(&table.first).map(|(_, g)| g.serial).hash(&mut h);
             }
             let key = h.finish();
             let fresh = cache.entries.get(line).is_none_or(|e| e.key != key);
@@ -676,7 +700,12 @@ impl<'a> Reader<'a> {
                     // A piece's first line holds its height; the rest none.
                     Some((true, tall)) => Row::Pad { lang: None, h: tall, blank: false },
                     Some((false, _)) => Row::Hidden,
-                    None => self.lay_out(line, &hidden, &colors, revealed, width, &cache.grids, window),
+                    None => {
+                        // The row that stood here, for a table's row on a
+                        // new grid to keep its cells from.
+                        let was = cache.entries.get(line).map(|e| e.row.clone());
+                        self.lay_out(line, &hidden, &colors, revealed, width, &cache.grids, (made_of, was.as_deref()), window)
+                    }
                 };
                 let height = row.height();
                 let entry = Entry { key, height, row: Rc::new(row) };
@@ -1078,7 +1107,7 @@ impl<'a> Reader<'a> {
     /// One line laid out: its words with the hidden marks taken out, in
     /// runs of the faces and inks its spans ask for, and its widgets.
     #[allow(clippy::too_many_arguments)]
-    fn lay_out(&self, line: usize, hidden: &[Range<usize>], colors: &[(Range<usize>, Hsla)], revealed: bool, width: f32, grids: &HashMap<usize, (u64, Rc<Grid>)>, window: &mut Window) -> Row {
+    fn lay_out(&self, line: usize, hidden: &[Range<usize>], colors: &[(Range<usize>, Hsla)], revealed: bool, width: f32, grids: &HashMap<usize, (u64, Rc<Grid>)>, was: (u64, Option<&Row>), window: &mut Window) -> Row {
         let info = &self.analysis.lines[line];
         let rhythm = self.rhythm;
         let px_text = self.look.text_px;
@@ -1088,7 +1117,7 @@ impl<'a> Reader<'a> {
         if let LineKind::TableFirst(t) | LineKind::TableRow(t) = &info.kind {
             let table = &self.analysis.tables[*t];
             let (Some(row), Some((_, grid))) = (table.row_of(line), grids.get(&table.first)) else { return Row::Hidden };
-            return self.table_row(table, row, grid.clone(), hidden, width, window);
+            return self.table_row(table, row, grid.clone(), hidden, was, window);
         }
         // A blank line as the view around sets blocks apart, one height
         // whether the selection is on it or not, so a drag over it moves
@@ -1211,9 +1240,10 @@ impl<'a> Reader<'a> {
     /// longest line asks; past that each keeps its longest word and the
     /// room left is shared by what the rest ask, as a browser sets a
     /// table, so a word is broken only where the room gives out.
-    fn make_grids(&self, grids: &mut HashMap<usize, (u64, Rc<Grid>)>, width: f32, window: &mut Window) {
+    fn make_grids(&self, cache: &mut Cache, width: f32, window: &mut Window) {
         // As the code's colors: carried by first line or by key.
-        let mut was = std::mem::take(grids);
+        let mut was = std::mem::take(&mut cache.grids);
+        let grids = &mut cache.grids;
         for t in &self.analysis.tables {
             let mut h = DefaultHasher::new();
             width.to_bits().hash(&mut h);
@@ -1237,8 +1267,15 @@ impl<'a> Reader<'a> {
             let room = (width - self.inset_of(&self.analysis.lines[t.first])).max(80.);
             let cols = match held {
                 Some((_, c)) if c.len() == t.columns() => c.clone(),
-                _ => self.columns_of(t, room, window),
+                _ => self.columns_of(t, room, &mut cache.asks, window),
             };
+            // The same columns in the same room, as after most letters
+            // typed in a cell: the grid stands, and with it every row
+            // laid out on it but the one typed in.
+            if let Some((_, old)) = was.get(&t.first).filter(|(_, g)| g.cols == cols && g.room == room) {
+                grids.insert(t.first, (key, old.clone()));
+                continue;
+            }
             let mut xs = Vec::with_capacity(cols.len());
             let mut x = 0.;
             for c in &cols {
@@ -1247,39 +1284,91 @@ impl<'a> Reader<'a> {
             }
             // Made again as its words change, it stays scrolled where it was.
             let slid = was.get(&t.first).map_or(0., |(_, g)| g.slide.get());
-            let grid = Grid { cols, xs, width: x, room, slide: Cell::new(0.) };
+            cache.grid_serial += 1;
+            let grid = Grid { cols, xs, width: x, room, slide: Cell::new(0.), serial: cache.grid_serial };
             grid.slide_to(slid);
             grids.insert(t.first, (key, Rc::new(grid)));
         }
+        // What is kept of rows that are gone (each letter typed in a row
+        // leaves the row as it was) is let go once it outgrows the rows
+        // there are.
+        let rows: usize = self.analysis.tables.iter().map(|t| t.cells.len()).sum();
+        if cache.asks.len() > rows * 2 + 256 {
+            let at_rest = Reader { sel: None, ..*self };
+            let live: std::collections::HashSet<u64> = self.analysis.tables.iter().flat_map(|t| (0..t.cells.len()).map(|ri| at_rest.asks_key(t, ri, &at_rest.hidden_on(t.line_of(ri))))).collect();
+            cache.asks.retain(|key, _| live.contains(key));
+        }
     }
 
-    fn columns_of(&self, t: &Table, room: f32, window: &mut Window) -> Vec<f32> {
+    /// The key of what a table's row asks at rest (`row_asks`): its line
+    /// and what is read of it, in the line's own bytes, as a row's key is.
+    fn asks_key(&self, t: &Table, ri: usize, hidden: &[Range<usize>]) -> u64 {
+        let line = t.line_of(ri);
+        let text = self.doc.line(line);
+        let start = self.analysis.line_starts[line];
+        let local = |r: &Range<usize>| r.start.saturating_sub(start).min(text.len())..r.end.saturating_sub(start).min(text.len());
+        let mut h = DefaultHasher::new();
+        text.hash(&mut h);
+        (ri == 0 && !self.look.plain_head, t.columns(), self.rhythm.cell_px.to_bits()).hash(&mut h);
+        t.cells.get(ri).hash(&mut h);
+        hidden.hash(&mut h);
+        for (r, style) in self.marks_on(line) {
+            local(r).hash(&mut h);
+            style.hash(&mut h);
+        }
+        for &ix in &self.analysis.line_spans[line] {
+            let s = &self.analysis.spans[ix];
+            for r in [&s.range, &s.open, &s.close] {
+                local(r).hash(&mut h);
+            }
+        }
+        h.finish()
+    }
+
+    /// What each cell of a table's row asks, set as it is drawn on one
+    /// line however long: code is in its own face with its plate's room,
+    /// wider than the words' face. Measured in the words' face, a column
+    /// of file names came out narrower than its names, and each broke
+    /// before its end. Kept by the row's key, so a letter typed in a
+    /// table measures its own row and a new width measures none: setting
+    /// a cell is shaping its words, the most of a table's layout.
+    fn row_asks(&self, t: &Table, ri: usize, asks: &mut HashMap<u64, Rc<Vec<(f32, f32)>>>, window: &mut Window) -> Rc<Vec<(f32, f32)>> {
+        let line = t.line_of(ri);
+        let hidden = self.hidden_on(line);
+        let key = self.asks_key(t, ri, &hidden);
+        if let Some(kept) = asks.get(&key) {
+            return kept.clone();
+        }
+        let weight = if ri == 0 && !self.look.plain_head { FontWeight::SEMIBOLD } else { FontWeight::NORMAL };
+        let (styles, links) = self.styled(line, weight, false, false, &[]);
+        let n = t.columns();
+        let mut row = vec![(0f32, 0f32); n];
+        for (ci, spot) in t.cells[ri].iter().enumerate().take(n) {
+            let flow = self.flow(line, spot.clone(), &styles, &links, &hidden, self.rhythm.cell_px, self.rhythm.cell_line, UNWRAPPED, TextAlign::Left, self.look.colors.ink, window);
+            for para in &flow.paras {
+                if para.shown.text.is_empty() {
+                    continue;
+                }
+                let laid = &para.line.unwrapped_layout;
+                row[ci].0 = row[ci].0.max(f32::from(laid.width));
+                for word in unbroken(&para.shown.text) {
+                    row[ci].1 = row[ci].1.max(f32::from(laid.x_for_index(word.end) - laid.x_for_index(word.start)));
+                }
+            }
+        }
+        let row = Rc::new(row);
+        asks.insert(key, row.clone());
+        row
+    }
+
+    fn columns_of(&self, t: &Table, room: f32, asks: &mut HashMap<u64, Rc<Vec<(f32, f32)>>>, window: &mut Window) -> Vec<f32> {
         let n = t.columns();
         let at_rest = Reader { sel: None, ..*self };
-        let px_cell = self.rhythm.cell_px;
-        let ink = self.look.colors.ink;
         let (mut most, mut least) = (vec![0f32; n], vec![0f32; n]);
-        // Each cell set as it is drawn, on one line however long: code is
-        // in its own face with its plate's room, wider than the words'
-        // face. Measured in the words' face, a column of file names came
-        // out narrower than its names, and each broke before its end.
-        for (ri, spots) in t.cells.iter().enumerate() {
-            let line = t.line_of(ri);
-            let hidden = at_rest.hidden_on(line);
-            let weight = if ri == 0 && !self.look.plain_head { FontWeight::SEMIBOLD } else { FontWeight::NORMAL };
-            let (styles, links) = at_rest.styled(line, weight, false, false, &[]);
-            for (ci, spot) in spots.iter().enumerate().take(n) {
-                let flow = at_rest.flow(line, spot.clone(), &styles, &links, &hidden, px_cell, self.rhythm.cell_line, UNWRAPPED, TextAlign::Left, ink, window);
-                for para in &flow.paras {
-                    if para.shown.text.is_empty() {
-                        continue;
-                    }
-                    let laid = &para.line.unwrapped_layout;
-                    most[ci] = most[ci].max(f32::from(laid.width));
-                    for word in unbroken(&para.shown.text) {
-                        least[ci] = least[ci].max(f32::from(laid.x_for_index(word.end) - laid.x_for_index(word.start)));
-                    }
-                }
+        for ri in 0..t.cells.len() {
+            for (ci, (line, word)) in at_rest.row_asks(t, ri, asks, window).iter().enumerate().take(n) {
+                most[ci] = most[ci].max(*line);
+                least[ci] = least[ci].max(*word);
             }
         }
         let pad = CELL_X * 2. + 1.;
@@ -1295,16 +1384,31 @@ impl<'a> Reader<'a> {
         shared(&most, &floors(&most, &word), room)
     }
 
-    #[allow(clippy::too_many_arguments)]
-    fn table_row(&self, t: &Table, row: usize, grid: Rc<Grid>, hidden: &[Range<usize>], _width: f32, window: &mut Window) -> Row {
+    /// A table's row on its grid. `was` is the key of what the row is
+    /// made from but its grid, and the row that stood on its line: where
+    /// that is this row on another grid (a column widened by a letter
+    /// typed, or dragged), a cell whose column is as wide as it was is
+    /// kept as it is, and only the others are set again.
+    fn table_row(&self, t: &Table, row: usize, grid: Rc<Grid>, hidden: &[Range<usize>], was: (u64, Option<&Row>), window: &mut Window) -> Row {
         let line = t.line_of(row);
         let rhythm = self.rhythm;
         let weight = if row == 0 && !self.look.plain_head { FontWeight::SEMIBOLD } else { FontWeight::NORMAL };
-        let (styles, links) = self.styled(line, weight, false, false, &[]);
+        let (made_of, was) = was;
+        let was = match was {
+            Some(Row::Table(r)) if r.made_of == made_of => Some(r),
+            _ => None,
+        };
+        let mut styled = None;
         let spots: Vec<Range<usize>> = t.cells.get(row).cloned().unwrap_or_default();
         let mut cells = Vec::with_capacity(grid.cols.len());
         let mut tallest = rhythm.cell_line;
         for (ci, col) in grid.cols.iter().enumerate() {
+            if let Some(kept) = was.filter(|r| r.grid.cols.get(ci) == Some(col)).and_then(|r| r.cells.get(ci)) {
+                tallest = tallest.max(kept.height);
+                cells.push(kept.clone());
+                continue;
+            }
+            let (styles, links) = styled.get_or_insert_with(|| self.styled(line, weight, false, false, &[]));
             let range = spots.get(ci).cloned().unwrap_or_else(|| {
                 let end = self.doc.line(line).len();
                 end..end
@@ -1315,12 +1419,12 @@ impl<'a> Reader<'a> {
                 _ => TextAlign::Left,
             };
             let wrap = (col - CELL_X * 2.).max(10.);
-            let flow = self.flow(line, range, &styles, &links, hidden, rhythm.cell_px, rhythm.cell_line, wrap, align, self.look.colors.ink, window);
+            let flow = self.flow(line, range, styles, links, hidden, rhythm.cell_px, rhythm.cell_line, wrap, align, self.look.colors.ink, window);
             tallest = tallest.max(flow.height);
-            cells.push(flow);
+            cells.push(Rc::new(flow));
         }
         let inset = self.inset_of(&self.analysis.lines[line]);
-        Row::Table(TableRow { grid, head: row == 0, cells, spots, height: tallest + rhythm.cell_y * 2., inset, cell_y: rhythm.cell_y })
+        Row::Table(TableRow { grid, head: row == 0, cells, spots, height: tallest + rhythm.cell_y * 2., inset, cell_y: rhythm.cell_y, made_of })
     }
 }
 
@@ -1458,7 +1562,7 @@ mod tests {
 
     #[test]
     fn a_grid_scrolls_no_further_than_it_has() {
-        let grid = super::Grid { cols: vec![300., 300.], xs: vec![0., 300.], width: 600., room: 400., slide: Default::default() };
+        let grid = super::Grid { cols: vec![300., 300.], xs: vec![0., 300.], width: 600., room: 400., slide: Default::default(), serial: 0 };
         assert_eq!((grid.shown(), grid.slack()), (400., 200.));
         assert!(grid.slide_to(500.));
         assert_eq!(grid.slide.get(), 200.);

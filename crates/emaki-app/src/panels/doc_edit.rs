@@ -167,6 +167,10 @@ impl Workbench {
         // A block of code goes by the file's size, a little under it.
         look.mono_px = crate::fonts::code_px(size);
         look.colors.plate = theme.muted;
+        // What the words stand on is the file's pane, a step off the page:
+        // a table wider than the pane fades into that at a cut side, and
+        // its corners are cut in it.
+        look.colors.ground = crate::look::file_ground(theme);
         let h = |scale: f32| live::Heading { scale, line: 1.6, above: 0. };
         look.headings = Some([h(1.7), h(1.5), h(1.25), h(1.125), h(1.), h(1.)]);
         look.cells = Some((1., 1.4));

@@ -2661,11 +2661,17 @@ pub(crate) const MARK_PX: f32 = 11.5;
 
 /// The ground and the outline of a table, the head's tint inside it. The
 /// lines between its cells are each row's.
-fn paint_plate(left: f32, top: f32, width: f32, height: f32, head: f32, inks: &Colors, window: &mut Window) {
+/// A table's plate under its rows: the head's shade, and the frame's
+/// line, unless that is drawn over the rows (`line`: a table wider than
+/// its room, whose rows scroll under its frame).
+#[allow(clippy::too_many_arguments)]
+fn paint_plate(left: f32, top: f32, width: f32, height: f32, head: f32, line: bool, inks: &Colors, window: &mut Window) {
     let r = px(TABLE_R);
     let corners = Corners { top_left: r, top_right: r, bottom_left: px(0.), bottom_right: px(0.) };
     window.paint_quad(quad(Bounds::new(point(px(left), px(top)), size(px(width), px(head))), corners, inks.plate.opacity(0.7), px(0.), transparent_black(), BorderStyle::default()));
-    window.paint_quad(quad(Bounds::new(point(px(left), px(top)), size(px(width), px(height))), r, clear_of(inks.border), px(1.), inks.border, BorderStyle::default()));
+    if line {
+        window.paint_quad(quad(Bounds::new(point(px(left), px(top)), size(px(width), px(height))), r, clear_of(inks.border), px(1.), inks.border, BorderStyle::default()));
+    }
 }
 
 /// One row at a place on the page.
@@ -2712,8 +2718,13 @@ fn paint_row(row: &Row, ox: f32, oy: f32, height: f32, full_w: Pixels, line: usi
                     window.paint_quad(fill(Bounds::new(frame.origin, size(frame.size.width, px(1.))), inks.border));
                 }
                 for (c, flow) in t.cells.iter().enumerate() {
-                    let Some(at) = t.grid.xs.get(c) else { continue };
+                    let (Some(at), Some(w)) = (t.grid.xs.get(c), t.grid.cols.get(c)) else { continue };
                     let x = left + at;
+                    // A column scrolled out of sight is not drawn: of a
+                    // table of thirty, most are.
+                    if px(x + w) < frame.left() || px(x) > frame.right() {
+                        continue;
+                    }
                     if c > 0 {
                         window.paint_quad(fill(Bounds::new(point(px(x), px(oy)), size(px(1.), px(t.height))), inks.border));
                     }
@@ -2915,7 +2926,7 @@ impl Element for EditorElement {
             let (Some(top), Some(last), Some(last_top), Some(head)) = (cache.tops.get(first_line), cache.entries.get(last_line), cache.tops.get(last_line), cache.entries.get(first_line)) else { continue };
             let bottom = last_top + last.height;
             if let (Row::Table(t), true) = (&*head.row, visible(*top, bottom - top)) {
-                paint_plate(ox + t.inset, oy + top, t.grid.shown(), bottom - top, head.height, &inks, window);
+                paint_plate(ox + t.inset, oy + top, t.grid.shown(), bottom - top, head.height, t.grid.slack() <= 0., &inks, window);
             }
         }
 
@@ -2932,23 +2943,44 @@ impl Element for EditorElement {
         }
         drop(cache);
         // Where more of a table lies past a side, its rows fade into the
-        // page there, inside its frame's line.
+        // page there. The fade is a box, as what scrolls under it is, and
+        // the frame's corners are round: so the four corners are painted
+        // in the page's ground outside the frame's curve (one quad's
+        // border, as wide as the corner is round, kept to the frame),
+        // and the frame's line is drawn again over all of it. The fade
+        // set inside the line stood square in the curve, and words
+        // scrolled under the edge showed over the line.
         let at = |b: Bounds<Pixels>| Bounds::new(point(px(ox) + b.origin.x, px(oy) + b.origin.y), b.size);
         for &(frame, left, right) in &info.cuts {
             let frame = at(frame);
-            let inner = Bounds::new(point(frame.origin.x + px(1.), frame.origin.y + px(1.)), size(frame.size.width - px(2.), frame.size.height - px(2.)));
-            let w = px(TABLE_FADE).min(inner.size.width / 2.);
+            let w = px(TABLE_FADE).min(frame.size.width / 2.);
             let clear = inks.ground.opacity(0.);
             if left {
-                window.paint_quad(fill(Bounds::new(inner.origin, size(w, inner.size.height)), linear_gradient(90., linear_color_stop(inks.ground, 0.), linear_color_stop(clear, 1.))));
+                window.paint_quad(fill(Bounds::new(frame.origin, size(w, frame.size.height)), linear_gradient(90., linear_color_stop(inks.ground, 0.), linear_color_stop(clear, 1.))));
             }
             if right {
-                window.paint_quad(fill(Bounds::new(point(inner.right() - w, inner.origin.y), size(w, inner.size.height)), linear_gradient(90., linear_color_stop(clear, 0.), linear_color_stop(inks.ground, 1.))));
+                window.paint_quad(fill(Bounds::new(point(frame.right() - w, frame.origin.y), size(w, frame.size.height)), linear_gradient(90., linear_color_stop(clear, 0.), linear_color_stop(inks.ground, 1.))));
             }
+            let r = px(TABLE_R);
+            window.with_content_mask(Some(ContentMask { bounds: frame }), |window| {
+                window.paint_quad(quad(frame.dilate(r), r * 2., clear_of(inks.ground), r, inks.ground, BorderStyle::default()));
+            });
+            window.paint_quad(quad(frame, r, clear_of(inks.border), px(1.), inks.border, BorderStyle::default()));
         }
         if let Some((b, frame)) = info.cell {
-            window.with_content_mask(Some(ContentMask { bounds: at(frame) }), |window| {
-                window.paint_quad(quad(at(b), px(3.), clear_of(inks.accent), px(1.5), inks.accent, BorderStyle::default()));
+            let (b, frame) = (at(b), at(frame));
+            // A cell reaches a point past its row, onto the line of the
+            // row under it; the last row has none, and ends with the table.
+            let foot = frame.bottom() - px(1.);
+            let b = Bounds::from_corners(b.origin, point(b.right(), b.bottom().min(foot)));
+            // A corner of the cell that is a corner of its table is as
+            // round as the table's.
+            let near = |a: Pixels, b: Pixels| (a - b).abs() < px(0.5);
+            let (l, t, r, f) = (near(b.left(), frame.left()), near(b.top(), frame.top()), near(b.right(), frame.right()), near(b.bottom(), foot));
+            let round = |is: bool| if is { px(TABLE_R) } else { px(3.) };
+            let corners = Corners { top_left: round(l && t), top_right: round(r && t), bottom_left: round(l && f), bottom_right: round(r && f) };
+            window.with_content_mask(Some(ContentMask { bounds: frame }), |window| {
+                window.paint_quad(quad(b, corners, clear_of(inks.accent), px(1.5), inks.accent, BorderStyle::default()));
             });
         }
         if let Some(c) = &info.controls {

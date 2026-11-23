@@ -2903,6 +2903,7 @@ impl BlockNode {
                 div()
                     .id("row")
                     .w_full()
+                    .when(row_ix == 0, |this| this.bg(table_head_tint(cx)))
                     .when(row_ix < row_count - 1, |this| this.border_b_1())
                     .border_color(cx.theme().border)
                     .flex()
@@ -2941,15 +2942,21 @@ impl BlockNode {
             .w_full()
             .child(
                 div()
-                    .id(("table-frame", options.ix))
                     .relative()
                     // As wide as its columns' text and no wider, up to the
                     // room: a table of two short columns stretched across
                     // the line read as empty cells. (Emaki change.)
                     .w(px(content_w + 2.))
                     .max_w_full()
+                    .child(
+                div()
+                    .id(("table-frame", options.ix))
+                    .relative()
+                    .w_full()
                     .border_1()
-                    .border_color(cx.theme().border)
+                    // Room for the line, which is drawn once, over what
+                    // the frame holds (`table_frame_line`).
+                    .border_color(gpui::transparent_black())
                     .rounded(cx.theme().radius)
                     .overflow_hidden()
                     .child(
@@ -2974,6 +2981,8 @@ impl BlockNode {
                     .when(most - at > px(1.), |d| d.child(fade(false)))
                     .child(code_drag(drag, scroll_handle.clone()).absolute().inset_0())
                     .horizontal_scrollbar(&scroll_handle),
+                    )
+                    .child(table_frame_line(ground, cx)),
             )
             .into_any_element()
     }
@@ -3101,6 +3110,7 @@ impl BlockNode {
                 div()
                     .id("row")
                     .w_full()
+                    .when(row_ix == 0, |this| this.bg(table_head_tint(cx)))
                     .when(row_ix < row_count - 1, |this| this.border_b_1())
                     .border_color(cx.theme().border)
                     .flex()
@@ -3114,14 +3124,20 @@ impl BlockNode {
             .w_full()
             .child(
                 div()
-                    .id(("table", options.ix))
+                    .relative()
                     .w_full()
-                    .border_1()
-                    .border_color(cx.theme().border)
-                    .rounded(cx.theme().radius)
-                    .overflow_hidden()
-                    .children(rows)
-                    .refine_style(&style.table),
+                    .child(
+                        div()
+                            .id(("table", options.ix))
+                            .w_full()
+                            .border_1()
+                            .border_color(gpui::transparent_black())
+                            .rounded(cx.theme().radius)
+                            .overflow_hidden()
+                            .children(rows)
+                            .refine_style(&style.table),
+                    )
+                    .child(table_frame_line(style.table_ground.unwrap_or(cx.theme().background), cx)),
             )
             .into_any_element()
     }
@@ -4635,4 +4651,38 @@ mod tests {
         );
         assert_eq!(cached_dark_theme.as_ref(), dark_theme.as_ref());
     }
+}
+
+/// (Emaki addition.) The shade a table's head stands on, as the rendered
+/// editor's has it (`live::editor::paint_plate`), so a table reads the
+/// same in a conversation and in a file written in.
+fn table_head_tint(cx: &App) -> Hsla {
+    cx.theme().muted.opacity(0.7)
+}
+
+/// (Emaki addition.) A table's frame's corners and its line, over what
+/// the frame holds. gpui cuts what a frame holds at its box, not at its
+/// curve, so the head's shade, a fade at a cut side and the words
+/// scrolled under it all stood square in the frame's round corners. The
+/// four corners are painted in the ground the table stands on, outside
+/// the curve (one quad's border, as wide as the corner is round, kept to
+/// the frame), and the frame's line is drawn again over that. It takes no
+/// press and no hover. It stands in a box around the frame: a frame cuts
+/// what it holds inside its line, so this cannot be drawn from inside it.
+fn table_frame_line(ground: Hsla, cx: &App) -> impl IntoElement {
+    let (r, line) = (cx.theme().radius, cx.theme().border);
+    gpui::canvas(
+        |_, _, _| (),
+        move |bounds, _, window, _| {
+            // Each quad is clear in its own color inside: where a quad's
+            // edge is smoothed, its border is mixed with what it is filled
+            // with, and clear black left a dark fringe along the curve.
+            window.with_content_mask(Some(gpui::ContentMask { bounds }), |window| {
+                window.paint_quad(gpui::quad(bounds.dilate(r), r * 2., ground.opacity(0.), r, ground, gpui::BorderStyle::default()));
+            });
+            window.paint_quad(gpui::quad(bounds, r, line.opacity(0.), px(1.), line, gpui::BorderStyle::default()));
+        },
+    )
+    .absolute()
+    .inset_0()
 }
