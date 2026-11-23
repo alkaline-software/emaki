@@ -2,6 +2,19 @@
 
 Each release has a section here, and `release.yml` puts that section on the GitHub Release as its notes. Write it for the person installing the app, as a numbered list: a topic in bold, then one sentence on what changed for them, with small fixes gathered under **Fixes**. Ten items at most. The reasoning belongs in AGENTS.md and `docs/`.
 
+## v0.5.6
+
+1. **Sidebar**: New Session and the pair of All Sessions and Agents are small cards on one line, the page that shows lit on a plate that slides between the two, and a second click on the lit one closes its page; the collapsed sidebar has the same pair.
+2. **Fades**: The sidebar, the files tree, a file and the conversation fade at their top and foot wherever there is more to scroll to.
+3. **Wide tables**: In the rendered editor a table too wide for its place keeps its columns readable and scrolls sideways, as it does in a conversation, and a table's header is shaded in both.
+4. **Selecting in tables**: A drag inside a cell selects in that cell alone, a drag across cells takes them whole, and copied cells come with tabs between them.
+5. **Typing in tables**: A key typed in a large table lays out its own row and no longer the whole table, about ten times faster.
+6. **Files panel**: A double click on its divider fits the branch's name and the count of changes as well as the tree.
+7. **Source editor**: The margin of line numbers is narrower and stands on the pane's own ground.
+8. **History**: A commit's files have a divider to drag, and a long path is cut clean with the whole of it on hover.
+9. **Rust files**: A `.rs` file wears Rust's gear and R in place of the crab.
+10. **Fixes**: A scrolled table's corners stay round, compared pictures stay inside their plate, a click in the composer's padding places the caret, JetBrains Mono's name fits its tile in Settings, and the fonts there are in a new order.
+
 ## v0.5.5
 
 1. **Sidebar**: New Session, All Sessions and Agents share one line, and your projects are one list with the pinned ones first, moving into place when pinned or let go.
