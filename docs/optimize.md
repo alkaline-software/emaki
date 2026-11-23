@@ -1,4 +1,4 @@
-# Performance
+# Optimization
 
 About keeping Emaki fast and light: how an optimization pass is done, the rules passes have left, and the log of every pass, which is what makes the next one incremental. The frame rules (the window's clock, kept views) are in `docs/window.md`, Frames.
 

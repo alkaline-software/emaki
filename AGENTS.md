@@ -64,7 +64,7 @@ Each is here because breaking it loses data or reintroduces a bug that was alrea
 - **A field's keys are the toolkit's, never a field's own.** Every place words are typed but the composer is the toolkit's `Input`, and what a key does in one (up to the start and down to the end of one line, ⇧ with either to select there) is fixed in `vendor/gpui-component`, where every field now and later has it. Do not handle a caret key in one field. (`docs/window.md`)
 - **The composer is Onyx's live-preview editor** (`live/`), the one place words are typed that is not the toolkit's field: its keys are its own, and what it sends is what was typed. (`docs/composer.md`)
 - **One copy of gpui.** The pin is in `Cargo.lock`, not a `rev` of our own. Changes to the toolkit go in `vendor/gpui-component/`, marked and listed in its `UPSTREAM.md`. (`docs/platform.md`)
-- **A picture is drawn through the cache of the place that shows it** (`pictures::Kept`: `pictures::through`, or an `image_cache` of one around a markdown view), never handed to gpui as a path or as bytes: gpui keeps every picture it decodes, and its copy on the GPU, until the app quits. (`docs/performance.md`)
+- **A picture is drawn through the cache of the place that shows it** (`pictures::Kept`: `pictures::through`, or an `image_cache` of one around a markdown view), never handed to gpui as a path or as bytes: gpui keeps every picture it decodes, and its copy on the GPU, until the app quits. (`docs/optimize.md`)
 - **A child process is started with `emaki_core::process::command`, never `Command::new`,** or on Windows each one opens a console window. (`docs/platform.md`)
 - **Everything Unix-only is gated with a stated fallback.** Windows and Linux are build targets. (`docs/platform.md`)
 - **A card that comes up while a session runs stands at the conversation's end and scrolls with it,** never over the composer. It goes in `render_cards`, its body through `card_scroll`, which caps its height and scrolls both ways. (`docs/live-turn.md`, The cards)
@@ -96,7 +96,7 @@ Open the doc for a file before changing that file. This is not optional for a sm
 | `emaki-core/src/adapters/`, `search.rs`, `explain.rs`, `store.rs`, `render_md.rs`, `paths.rs`, `config.rs`, `watcher.rs`, `moves.rs`, `remote.rs`, `remote_files.rs` | `docs/core.md` |
 | `vendor/`, `Cargo.toml`, `.github/workflows/`, release and icon scripts, `update.rs`, `process.rs`, `csd.rs`, any `cfg` for an OS | `docs/platform.md` |
 | Checking a change in the window from a script | `docs/probing.md` |
-| An optimization pass, or anything that runs at every frame, in a loop or on a timer | `docs/performance.md`, its log first |
+| An optimization pass, or anything that runs at every frame, in a loop or on a timer | `docs/optimize.md`, its log first |
 | Bumping the version and cutting a release | `docs/release.md` |
 
 A change that crosses two rows reads both docs. `workbench.rs` is in most rows: go by what the code you are changing does.
