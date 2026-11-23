@@ -58,7 +58,11 @@ const FOLD_ICON_WIDTH: Pixels = px(14.);
 /// Room between the line numbers and the fold marks for the
 /// application's marks (`GutterMark`), so a bar stands clear of both.
 /// (Emaki addition.)
-const MARK_LANE: Pixels = px(13.);
+/// As wide as a mark and a little air at each side: wider, with the
+/// fold marks' box after it, the text stood far off its numbers.
+const MARK_LANE: Pixels = px(8.);
+/// How far into its lane a mark stands.
+const MARK_INSET: Pixels = px(4.);
 /// The strip at a code editor's right edge that its scrollbar runs in,
 /// with the application's marks and the cursor's line shown small down
 /// it. (Emaki addition.)
@@ -982,9 +986,12 @@ impl<M: InputModeKind> TextElement<M> {
         window: &mut Window,
     ) -> (Pixels, usize) {
         let total_lines = text.lines_len();
-        // One extra column beyond the widest line number, so right-aligned
-        // numbers keep a gap from the left edge.
-        let line_number_len = total_lines.max(1).ilog10() as usize + 2;
+        // As many columns as the last line's number has, and two at the
+        // least, so a short file's text does not step aside at its tenth
+        // line. The room at the numbers' left is the editor's own
+        // padding. (Emaki: upstream kept one column more, empty, which
+        // with that padding left the widest number far from the edge.)
+        let line_number_len = (total_lines.max(1).ilog10() as usize + 1).max(2);
 
         let mut line_number_width = if state.mode.line_number() {
             let empty_line_number = window.text_system().shape_line(
@@ -2458,7 +2465,7 @@ impl<M: InputModeKind> Element for TextElement<M> {
             // In the lane kept for them before the fold marks; with no
             // fold marks, in the margin's own room.
             let numbers_end = origin.x + prepaint.last_layout.line_number_width - LINE_NUMBER_RIGHT_MARGIN;
-            let mark_x = if folding { numbers_end - FOLD_ICON_HITBOX_WIDTH - MARK_LANE + px(8.) } else { numbers_end + px(3.) };
+            let mark_x = if folding { numbers_end - FOLD_ICON_HITBOX_WIDTH - MARK_LANE + MARK_INSET } else { numbers_end + px(3.) };
 
             // Each item is the normal lines.
             for (lines, &buffer_line) in line_numbers

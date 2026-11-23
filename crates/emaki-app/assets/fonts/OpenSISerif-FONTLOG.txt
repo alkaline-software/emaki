@@ -1,0 +1,18 @@
+OpenSI Serif
+
+Current change (0.394)
+- Set the copyright holder to The OpenSI Project Authors and the designer to auraunii.
+- Declared "OpenSI" as a Reserved Font Name under the SIL Open Font License 1.1.
+  Outlines, metrics, and styles are unchanged.
+
+Earlier changes
+- Renamed the family to OpenSI Serif. Outlines, metrics, and styles were retained.
+
+Earlier glyph changes
+- Replaced the lowercase g (and gcircumflex, gbreve, gdotaccent, gcommaaccent/uni0123) in Regular and Semibold
+  with the g from Source Serif 4 (SIL OFL 1.1, https://github.com/adobe-fonts/source-serif).
+  Modifications: taken from a variable-font instance whose weight matches this font's 'o' stem
+  (Regular ~97 units, Semibold ~142), scaled to this font's x-height, and the lower loop lifted
+  so the descender aligns with j/p/y (neck shortened, loop shape unchanged). Accents re-centred.
+- The family is therefore distributed under the SIL Open Font License 1.1 (see OFL.txt).
+- Italic: unchanged apart from names/version/license fields.

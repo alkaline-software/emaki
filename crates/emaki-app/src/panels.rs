@@ -3175,7 +3175,8 @@ impl Workbench {
     }
 
     /// The width a double click on the files panel's edge goes to: the
-    /// widest row showing, as it would be laid out.
+    /// widest row showing, as it would be laid out, and in a repository
+    /// no less than its head needs (`head_fit`).
     pub(crate) fn panel_fit(&mut self, window: &Window, cx: &App) -> Pixels {
         let Some(root) = self.files_root() else { return PANEL_W };
         let font = font(cx.theme().font_family.clone());
@@ -3183,6 +3184,7 @@ impl Workbench {
             let run = TextRun { len: text.len(), font: font.clone(), color: gpui::black(), background_color: None, underline: None, strikethrough: None };
             f32::from(window.text_system().shape_line(text.to_string().into(), px(12.5), &[run], None).width)
         };
+        let head = self.head_fit(window, cx);
         // Around a name: the scroller's padding on both sides and the
         // panel's edge (13), the row's indent, chevron, icon, gaps, the
         // git badge and right padding, and a little air.
@@ -3195,7 +3197,43 @@ impl Workbench {
                 Row::More(..) | Row::Edit(..) => None,
             })
             .fold(0f32, f32::max);
-        px(widest.ceil()).clamp(PANEL_MIN, PANEL_FIT_MAX.min(self.panel_max()))
+        px(widest.max(head).ceil()).clamp(PANEL_MIN, PANEL_FIT_MAX.min(self.panel_max()))
+    }
+
+    /// The width the panel's head needs in a repository, as it is laid
+    /// out (`panel_head`, `git_pills`, `changes_pill`): "Files", the
+    /// branch named whole on its button, and the count of changes. Fitted
+    /// to the tree alone, a panel of short names cut the branch to its
+    /// first letters. In a folder of checkouts the checkout's name is
+    /// there too, and the width is one the branch is named at. None
+    /// outside a repository.
+    fn head_fit(&self, window: &Window, cx: &App) -> f32 {
+        let Some(b) = self.branches() else { return 0. };
+        let words = |text: &str, size: f32, weight: FontWeight| {
+            let font = Font { weight, ..font(cx.theme().font_family.clone()) };
+            let run = TextRun { len: text.len(), font, color: gpui::black(), background_color: None, underline: None, strikethrough: None };
+            f32::from(window.text_system().shape_line(text.to_string().into(), px(size), &[run], None).width)
+        };
+        // A button: its edges, its padding, its icon, then what it says.
+        let button = 2. + 14. + 12.;
+        let named = |name: &str| button + 4. + words(name, 11.5, FontWeight::MEDIUM) + 4. + 9.;
+        let repo = self.git_dir().filter(|d| self.repo_of(d).is_some()).map(|d| named(&Self::repo_name(&d)).min(150.) + 6.);
+        let n = self.changes_count();
+        let changes = button + if n > 0 { 5. + words(&crate::format::thousands(n), 11.5, FontWeight::MEDIUM) } else { 0. };
+        // The head's padding, its three gaps, the panel's edge and a
+        // little air.
+        let all = 14. + words(&t("Files"), 11., FontWeight::SEMIBOLD) + 10. + repo.unwrap_or(0.) + named(&b.label()) + 10. + 10. + changes + 14. + 1. + 2.;
+        if repo.is_some() { all.max(f32::from(NAMED_BRANCH_AT)) } else { all }
+    }
+
+    /// How many files have a change, as the head's button counts them:
+    /// of a folder of checkouts, the one in use's.
+    fn changes_count(&self) -> usize {
+        let Some(root) = self.files_root() else { return 0 };
+        self.tree.git.as_ref().filter(|(of, _)| *of == root).map_or(0, |_| match self.git_dir() {
+            Some(d) if self.repo_of(&d).is_some() => self.repo_changes(&d),
+            _ => self.tree.changed.len(),
+        })
     }
 
     /// The picture showing as the pane keeps it (`file_pictures`), which
@@ -8671,15 +8709,11 @@ impl Workbench {
     /// on a button that opens the comparison.
     fn changes_pill(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
         let theme = cx.theme().clone();
-        let root = self.files_root()?;
+        self.files_root()?;
         // There in any repository, with nothing changed too: the sheet
         // it opens has the history as well, and Push.
         self.branches()?;
-        // Of a folder of checkouts, the one in use's.
-        let n = self.tree.git.as_ref().filter(|(of, _)| *of == root).map_or(0, |_| match self.git_dir() {
-            Some(d) if self.repo_of(&d).is_some() => self.repo_changes(&d),
-            _ => self.tree.changed.len(),
-        });
+        let n = self.changes_count();
         // A button as the branch's is, lit while its sheet is up.
         let open = self.changes.is_some();
         let changes = crate::shortcuts::keyed(t("Changes and History (⌘⇧G)"), "changes");

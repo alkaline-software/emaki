@@ -8,8 +8,9 @@
 //! Anthropic's and not ours to use.
 //!
 //! A face is a file a weight (regular, semibold, bold and an italic; the
-//! monospace ones a medium too), which the text system takes as bytes on
-//! every platform. A variable font handed over as bytes is held as its
+//! monospace ones a medium too; the OpenSI faces what their maker ships,
+//! a serif with no bold and a mono with a regular and a bold alone),
+//! which the text system takes as bytes on every platform. A variable font handed over as bytes is held as its
 //! regular alone, and every bold drawn as regular.
 //!
 //! None of the Latin faces has a Chinese, Japanese or Korean character,
@@ -33,28 +34,32 @@ pub struct Face {
 
 pub const SERIFS: &[Face] = &[
     Face { key: "source-serif", name: "Source Serif", family: "Source Serif 4" },
+    Face { key: "opensi-serif", name: "OpenSI Serif", family: "OpenSI Serif" },
     Face { key: "newsreader", name: "Newsreader", family: "Newsreader" },
-    Face { key: "literata", name: "Literata", family: "Literata" },
     Face { key: "lora", name: "Lora", family: "Lora" },
 ];
 
 pub const SANS: &[Face] = &[
+    Face { key: "source-sans", name: "Source Sans", family: "Source Sans 3" },
     Face { key: "inter", name: "Inter", family: "Inter" },
     Face { key: "plex-sans", name: "IBM Plex Sans", family: "IBM Plex Sans" },
-    Face { key: "source-sans", name: "Source Sans", family: "Source Sans 3" },
     Face { key: "geist", name: "Geist", family: "Geist" },
 ];
 
 /// The monospace faces, JetBrains Mono first and the one a file that
-/// names none gets. The second is the system's where it has one worth
-/// having: Monaco on a Mac, which is Apple's and is used from the system
-/// there, never carried. Elsewhere it is IBM Plex Mono, built in.
+/// names none gets. The third (`SYSTEM_MONO`) is the system's where it
+/// has one worth having: Monaco on a Mac, which is Apple's and is used
+/// from the system there, never carried. Elsewhere it is IBM Plex Mono,
+/// built in.
 pub const MONOS: &[Face] = &[
     Face { key: "jetbrains", name: "JetBrains Mono", family: "JetBrains Mono" },
+    Face { key: "opensi-mono", name: "OpenSI Mono", family: "OpenSI Mono" },
     if cfg!(target_os = "macos") { Face { key: "monaco", name: "Monaco", family: "Monaco" } } else { Face { key: "plex-mono", name: "IBM Plex Mono", family: "IBM Plex Mono" } },
     Face { key: "maple", name: "Maple Mono", family: "Maple Mono" },
-    Face { key: "geist-mono", name: "Geist Mono", family: "Geist Mono" },
 ];
+
+/// Where the system's place is in `MONOS`.
+const SYSTEM_MONO: usize = 2;
 
 /// The faces Chinese, Japanese and Korean may be set in behind the
 /// conversation's face, carried: Noto Serif SC and Noto Sans SC (Adobe
@@ -303,11 +308,6 @@ const FACES: &[&[u8]] = &[
     include_bytes!("../assets/fonts/Geist-Italic.ttf"),
     include_bytes!("../assets/fonts/Geist-Regular.ttf"),
     include_bytes!("../assets/fonts/Geist-SemiBold.ttf"),
-    include_bytes!("../assets/fonts/GeistMono-Bold.ttf"),
-    include_bytes!("../assets/fonts/GeistMono-Italic.ttf"),
-    include_bytes!("../assets/fonts/GeistMono-Medium.ttf"),
-    include_bytes!("../assets/fonts/GeistMono-Regular.ttf"),
-    include_bytes!("../assets/fonts/GeistMono-SemiBold.ttf"),
     include_bytes!("../assets/fonts/IBMPlexSans-Bold.ttf"),
     include_bytes!("../assets/fonts/IBMPlexSans-Italic.ttf"),
     include_bytes!("../assets/fonts/IBMPlexSans-Regular.ttf"),
@@ -319,10 +319,6 @@ const FACES: &[&[u8]] = &[
     include_bytes!("../assets/fonts/JetBrainsMono-Medium.ttf"),
     include_bytes!("../assets/fonts/JetBrainsMono-Regular.ttf"),
     include_bytes!("../assets/fonts/JetBrainsMono-SemiBold.ttf"),
-    include_bytes!("../assets/fonts/Literata-Bold.ttf"),
-    include_bytes!("../assets/fonts/Literata-Italic.ttf"),
-    include_bytes!("../assets/fonts/Literata-Regular.ttf"),
-    include_bytes!("../assets/fonts/Literata-SemiBold.ttf"),
     include_bytes!("../assets/fonts/Lora-Bold.ttf"),
     include_bytes!("../assets/fonts/Lora-Italic.ttf"),
     include_bytes!("../assets/fonts/Lora-Regular.ttf"),
@@ -336,6 +332,11 @@ const FACES: &[&[u8]] = &[
     include_bytes!("../assets/fonts/Newsreader-Italic.ttf"),
     include_bytes!("../assets/fonts/Newsreader-Regular.ttf"),
     include_bytes!("../assets/fonts/Newsreader-SemiBold.ttf"),
+    include_bytes!("../assets/fonts/OpenSIMono-Bold.ttf"),
+    include_bytes!("../assets/fonts/OpenSIMono-Regular.ttf"),
+    include_bytes!("../assets/fonts/OpenSISerif-Italic.ttf"),
+    include_bytes!("../assets/fonts/OpenSISerif-Regular.ttf"),
+    include_bytes!("../assets/fonts/OpenSISerif-SemiBold.ttf"),
     include_bytes!("../assets/fonts/SourceSans3-Bold.ttf"),
     include_bytes!("../assets/fonts/SourceSans3-Italic.ttf"),
     include_bytes!("../assets/fonts/SourceSans3-Regular.ttf"),
@@ -361,19 +362,17 @@ const CJK_FACES: &[&[u8]] = &[
 ];
 
 /// The monospace faces code among words is cut from (`inline_cut`), by
-/// the family each belongs to: those of `FACES`, and a light cut of each,
-/// carried for this alone. The light one is the cut's regular.
+/// the family each belongs to: those of `FACES`, and a light cut of each
+/// that has one, carried for this alone. The light one is the cut's
+/// regular. OpenSI Mono is a regular and a bold and no more, so its cut
+/// is smaller and no lighter, as Monaco's is.
 const MONO_FACES: &[(&str, &[u8])] = &[
     ("IBM Plex Mono", include_bytes!("../assets/fonts/IBMPlexMono-Light.ttf")),
     ("IBM Plex Mono", include_bytes!("../assets/fonts/IBMPlexMono-Regular.ttf")),
     ("IBM Plex Mono", include_bytes!("../assets/fonts/IBMPlexMono-Bold.ttf")),
     ("IBM Plex Mono", include_bytes!("../assets/fonts/IBMPlexMono-Italic.ttf")),
-    ("Geist Mono", include_bytes!("../assets/fonts/GeistMono-Light.ttf")),
-    ("Geist Mono", include_bytes!("../assets/fonts/GeistMono-Bold.ttf")),
-    ("Geist Mono", include_bytes!("../assets/fonts/GeistMono-Italic.ttf")),
-    ("Geist Mono", include_bytes!("../assets/fonts/GeistMono-Medium.ttf")),
-    ("Geist Mono", include_bytes!("../assets/fonts/GeistMono-Regular.ttf")),
-    ("Geist Mono", include_bytes!("../assets/fonts/GeistMono-SemiBold.ttf")),
+    ("OpenSI Mono", include_bytes!("../assets/fonts/OpenSIMono-Regular.ttf")),
+    ("OpenSI Mono", include_bytes!("../assets/fonts/OpenSIMono-Bold.ttf")),
     ("JetBrains Mono", include_bytes!("../assets/fonts/JetBrainsMono-Light.ttf")),
     ("JetBrains Mono", include_bytes!("../assets/fonts/JetBrainsMono-Medium.ttf")),
     ("JetBrains Mono", include_bytes!("../assets/fonts/JetBrainsMono-Regular.ttf")),
@@ -660,10 +659,10 @@ pub fn chat_face(choice: &str) -> &'static Face {
 /// The monospace face `choice` names: JetBrains Mono for anything else,
 /// which is also what a file that chose a face no longer here gets.
 pub fn mono_face(choice: &str) -> &'static Face {
-    // The second place is one choice with a face a system: a file that
+    // The system's place is one choice with a face a system: a file that
     // names the Mac's on a PC, or the PC's on a Mac, means that place.
     if matches!(choice, "monaco" | "plex-mono") {
-        return &MONOS[1];
+        return &MONOS[SYSTEM_MONO];
     }
     MONOS.iter().find(|f| f.key == choice).unwrap_or(&MONOS[0])
 }
@@ -1235,7 +1234,7 @@ mod tests {
     fn a_light_cut_is_the_regular_of_its_cut_family() {
         // Each family's light face, once cut, is at the weight its regular
         // was, so words at the regular weight get it.
-        for family in ["JetBrains Mono", "Maple Mono", "Geist Mono", "IBM Plex Mono"] {
+        for family in ["JetBrains Mono", "Maple Mono", "IBM Plex Mono"] {
             let weights: Vec<u16> = MONO_FACES.iter().filter(|(f, _)| *f == family).map(|(_, font)| inline_cut(font, INLINE_SCALE, "x").unwrap()).map(|cut| u16::from_be_bytes([table(&cut, b"OS/2")[4], table(&cut, b"OS/2")[5]])).collect();
             assert!(weights.contains(&400), "{family}: {weights:?}");
         }

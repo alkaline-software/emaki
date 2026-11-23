@@ -100,7 +100,7 @@
       },
       "highlight": {
         "editor.foreground": "#1F1F1F",
-        "editor.background": "#FBFBFA",
+        "editor.background": "@l-file",
         "editor.active_line.background": "#ECECEA",
         "editor.line_number": "#A3A199",
         "editor.active_line_number": "#1F1F1F",
@@ -338,7 +338,7 @@
       },
       "highlight": {
         "editor.foreground": "#D4D4D4",
-        "editor.background": "#1F1E1D",
+        "editor.background": "@d-file",
         "editor.active_line.background": "#262524",
         "editor.line_number": "#6E6E6A",
         "editor.active_line_number": "#D4D4D4",

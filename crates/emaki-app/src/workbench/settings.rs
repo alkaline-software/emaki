@@ -12,9 +12,11 @@ use super::*;
 /// Every section fits the first unscrolled. It is never narrower than
 /// it opens: the rows are laid out for that width (the controls'
 /// `CONTROL_W` beside a name and its line), and narrower, names broke
-/// mid-word and the monospace tiles cut their faces' names. Shorter, the
+/// mid-word and the monospace tiles cut their faces' names: a tile is a
+/// fifth of the page, and the longest name of a built-in face (JetBrains
+/// Mono) stands whole in it with a few points to spare. Shorter, the
 /// page scrolls.
-pub const SETTINGS_W: Pixels = px(820.);
+pub const SETTINGS_W: Pixels = px(860.);
 pub const SETTINGS_H: Pixels = px(600.);
 const SETTINGS_MIN: Size<Pixels> = Size { width: SETTINGS_W, height: px(460.) };
 /// The rail's width, and the page's margin at either side.
@@ -33,6 +35,8 @@ const CONTROL_H: Pixels = px(28.);
 const UPDATE_W: Pixels = px(190.);
 /// A card's corner.
 const CARD_R: Pixels = px(12.);
+/// The room at either side inside a font's tile.
+const TILE_PAD: f32 = 10.;
 /// How long Connect's left says it could not.
 const REMOTE_SAID_FOR: Duration = Duration::from_millis(3600);
 /// Connect, wide enough for "Connecting…" so it does not move as it says it.
@@ -892,7 +896,7 @@ impl Workbench {
             .flex_1()
             .min_w_0()
             .h(px(54.))
-            .px(px(10.))
+            .px(px(TILE_PAD))
             .justify_center()
             .gap(px(1.))
             .rounded(px(10.))
@@ -945,7 +949,7 @@ impl Workbench {
         let sample_px = match (&cjk_name, self.font_tiles.borrow().get(&slot)) {
             (Some(n), Some(b)) => {
                 let ems: f32 = n.chars().map(|c| if c.is_ascii() { 0.55 } else { 1. }).sum();
-                let room = f32::from(b.size.width) - 20. - 14.;
+                let room = f32::from(b.size.width) - 2. * TILE_PAD - 14.;
                 sample_px.min((room / ems.max(1.)).floor()).max(11.)
             }
             _ => sample_px,
@@ -1016,7 +1020,7 @@ impl Workbench {
             v_flex()
                 .id(SharedString::from(format!("face-custom-{slot:?}")))
                 .size_full()
-                .px(px(10.))
+                .px(px(TILE_PAD))
                 .justify_center()
                 .gap(px(4.))
                 .rounded(px(10.))

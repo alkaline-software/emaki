@@ -1,4 +1,5 @@
-Copyright 2024 The Geist Project Authors (https://github.com/vercel/geist-font.git)
+Copyright 2026 The OpenSI Project Authors, with Reserved Font Name "OpenSI"
+Copyright 2014 The Source Serif 4 Project Authors (https://github.com/adobe-fonts/source-serif)
 
 This Font Software is licensed under the SIL Open Font License, Version 1.1.
 This license is copied below, and is also available with a FAQ at:

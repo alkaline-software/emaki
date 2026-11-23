@@ -147,9 +147,13 @@ upstream revision finds them.
     - `MARK_LANE`: room between the line numbers and the fold marks, so
       a `GutterMark` stands clear of both. The margin is otherwise
       drawn in: `LINE_NUMBER_RIGHT_MARGIN` 2 and the fold mark's box 14
-      (upstream 10 and 18), so the text starts 29 points after its line
-      number, as VS Code's does; an editor with no fold marks keeps
-      upstream's ten (`PLAIN_GUTTER_GAP`).
+      (upstream 10 and 18), and the lane 8 with a mark 4 into it
+      (`MARK_INSET`), so the text starts 24 points after its line
+      number; an editor with no fold marks keeps upstream's ten
+      (`PLAIN_GUTTER_GAP`). The numbers take as many columns as the
+      last line's has, two at the least (`layout_line_numbers`;
+      upstream one more, empty, at their left, where the editor's
+      padding already is).
     - The fold marks are plain chevrons (upstream: ghost buttons with a
       plate under the pointer and on a folded one), shown while the
       pointer is in the margin and not on the cursor's line, and they

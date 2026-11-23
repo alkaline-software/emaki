@@ -246,7 +246,7 @@ pub struct Terminal {
     /// Kaku Dark or Kaku Light whatever the window is.
     pub theme: String,
     /// The monospace face, every one in the window: `jetbrains`,
-    /// `monaco` (`plex-mono` off a Mac), `maple`, `geist-mono`, or
+    /// `opensi-mono`, `monaco` (`plex-mono` off a Mac), `maple`, or
     /// `custom`, the system's face named in `font_custom`.
     pub font: String,
     pub font_custom: String,

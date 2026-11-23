@@ -91,9 +91,14 @@ pub fn files_ground(theme: &Theme) -> gpui::Hsla {
 /// conversation stands on, so the file reads as a sheet of its own beside
 /// the conversation with no line needed between them.
 pub fn file_ground(theme: &Theme) -> gpui::Hsla {
-    let hex = if theme.mode.is_dark() { 0x1b1a19 } else { 0xf7f6f3 };
-    gpui::rgb(hex).into()
+    gpui::rgb(if theme.mode.is_dark() { FILE_GROUND.1 } else { FILE_GROUND.0 }).into()
 }
+
+/// The file's pane's ground, light and dark. The theme file names it
+/// too ("@l-file", "@d-file") as the ground of the code editor, which
+/// paints its margin of line numbers itself: with the page's ground
+/// there, the margin stood out of the pane as a lighter strip.
+const FILE_GROUND: (u32, u32) = (0xf7f6f3, 0x1b1a19);
 
 /// The room between a list row's plate and its edge, at its top and foot.
 pub const ROW_BREATH: f32 = 1.5;
@@ -157,9 +162,10 @@ pub struct Inks {
 pub const INKS_LIGHT: Inks = Inks { blue: 0x286983, violet: 0x7A6398, gold: 0x8A6A1E, rose: 0xA3566F, teal: 0x357783, green: 0x4C7B58, red: 0xB0505F, gray: 0x85818F };
 pub const INKS_DARK: Inks = Inks { blue: 0x7FB4D0, violet: 0xC4A7E7, gold: 0xE9C083, rose: 0xE8B0AE, teal: 0x9CCFD8, green: 0xA3CCA4, red: 0xEB8FA6, gray: 0x8F8BA0 };
 
-/// The theme file with each ink's name replaced by its color.
+/// The theme file with each ink's name replaced by its color, and the
+/// file's pane's ground by its own.
 fn inked(json: &str) -> String {
-    let mut out = json.to_string();
+    let mut out = json.replace("\"@l-file\"", &format!("\"#{:06X}\"", FILE_GROUND.0)).replace("\"@d-file\"", &format!("\"#{:06X}\"", FILE_GROUND.1));
     for (p, inks) in [("l", &INKS_LIGHT), ("d", &INKS_DARK)] {
         for (name, c) in [("blue", inks.blue), ("violet", inks.violet), ("gold", inks.gold), ("rose", inks.rose), ("teal", inks.teal), ("green", inks.green), ("red", inks.red), ("gray", inks.gray)] {
             out = out.replace(&format!("\"@{p}-{name}\""), &format!("\"#{c:06X}\""));
