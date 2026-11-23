@@ -12,6 +12,7 @@
 //! block of HTML as it reads are not laid out here: each shows as the
 //! text it is written as.
 
+use std::cell::Cell;
 use std::collections::hash_map::DefaultHasher;
 use std::collections::HashMap;
 use std::hash::{Hash, Hasher};
@@ -36,6 +37,12 @@ pub(crate) const PLATE_X: f32 = 12.;
 pub(crate) const CELL_X: f32 = 10.;
 /// A column is never narrower.
 const LEAST_COLUMN: f32 = 48.;
+/// How narrow a column gives way to before its table scrolls sideways:
+/// about two lines of its longest cell, between these two, as the reading
+/// view holds its tables (the vendored `render_scroll_table`).
+const COLUMN_FLOOR: (f32, f32) = (160., 480.);
+/// A width no line reaches: a cell set at it is on one line.
+const UNWRAPPED: f32 = 1.0e6;
 
 /// Every vertical measure of a text at its sizes, in whole pixels, so
 /// the words' baselines stand on the pixel grid.
@@ -263,6 +270,31 @@ pub(crate) struct Grid {
     pub cols: Vec<f32>,
     pub xs: Vec<f32>,
     pub width: f32,
+    /// The width the table has on the page. Wider than that, it shows
+    /// that much of itself and scrolls sideways.
+    pub room: f32,
+    /// How far it is scrolled: what of its left is out of sight.
+    pub slide: Cell<f32>,
+}
+
+impl Grid {
+    /// How wide the table shows.
+    pub fn shown(&self) -> f32 {
+        self.width.min(self.room)
+    }
+
+    /// The most it scrolls.
+    pub fn slack(&self) -> f32 {
+        (self.width - self.room).max(0.)
+    }
+
+    /// Scrolled to `to`, held to what there is. Whether it moved.
+    pub fn slide_to(&self, to: f32) -> bool {
+        let to = to.clamp(0., self.slack());
+        let moved = (to - self.slide.get()).abs() > 0.01;
+        self.slide.set(to);
+        moved
+    }
 }
 
 /// One row of a table on a line of its own.
@@ -279,6 +311,18 @@ pub(crate) struct TableRow {
 }
 
 impl TableRow {
+    /// Where the first column's left edge is, in the line: left of the
+    /// table's own left by as much as the table is scrolled.
+    pub fn left(&self) -> f32 {
+        self.inset - self.grid.slide.get()
+    }
+
+    /// `x` in the line held to what shows of the table, so a point beside
+    /// it is the column at that edge and not one out of sight.
+    pub fn within(&self, x: f32) -> f32 {
+        x.clamp(self.inset, self.inset + (self.grid.shown() - 1.).max(0.))
+    }
+
     /// The column a place in the line stands in.
     pub fn column_of(&self, col: usize) -> usize {
         self.spots.iter().position(|s| col <= s.end).unwrap_or(self.spots.len().saturating_sub(1))
@@ -1201,49 +1245,54 @@ impl<'a> Reader<'a> {
                 xs.push(x);
                 x += c;
             }
-            grids.insert(t.first, (key, Rc::new(Grid { cols, xs, width: x })));
+            // Made again as its words change, it stays scrolled where it was.
+            let slid = was.get(&t.first).map_or(0., |(_, g)| g.slide.get());
+            let grid = Grid { cols, xs, width: x, room, slide: Cell::new(0.) };
+            grid.slide_to(slid);
+            grids.insert(t.first, (key, Rc::new(grid)));
         }
     }
 
     fn columns_of(&self, t: &Table, room: f32, window: &mut Window) -> Vec<f32> {
         let n = t.columns();
-        if let Some(shares) = t.shares.as_ref().filter(|s| s.len() == n) {
-            let total: f32 = shares.iter().sum();
-            return shares.iter().map(|s| (s / total * room).round().max(LEAST_COLUMN)).collect();
-        }
         let at_rest = Reader { sel: None, ..*self };
         let px_cell = self.rhythm.cell_px;
         let ink = self.look.colors.ink;
         let (mut most, mut least) = (vec![0f32; n], vec![0f32; n]);
-        let measure = |text: &str, head: bool, window: &mut Window| -> f32 {
-            let font = self.font(&self.look.text_family, if head && !self.look.plain_head { FontWeight::SEMIBOLD } else { FontWeight::NORMAL }, false);
-            let run = TextRun { len: text.len(), font, color: ink, background_color: None, underline: None, strikethrough: None };
-            f32::from(window.text_system().shape_line(SharedString::from(text.to_string()), px(px_cell), &[run], None).width())
-        };
+        // Each cell set as it is drawn, on one line however long: code is
+        // in its own face with its plate's room, wider than the words'
+        // face. Measured in the words' face, a column of file names came
+        // out narrower than its names, and each broke before its end.
         for (ri, spots) in t.cells.iter().enumerate() {
             let line = t.line_of(ri);
             let hidden = at_rest.hidden_on(line);
-            let text = self.doc.line(line);
+            let weight = if ri == 0 && !self.look.plain_head { FontWeight::SEMIBOLD } else { FontWeight::NORMAL };
+            let (styles, links) = at_rest.styled(line, weight, false, false, &[]);
             for (ci, spot) in spots.iter().enumerate().take(n) {
-                for para in at_rest.para_ranges(line, spot.clone(), &hidden) {
-                    let mut out = hidden.clone();
-                    out.push(0..para.start);
-                    out.push(para.end..text.len());
-                    let shown = Shown::new(text, &out);
-                    if shown.text.is_empty() {
+                let flow = at_rest.flow(line, spot.clone(), &styles, &links, &hidden, px_cell, self.rhythm.cell_line, UNWRAPPED, TextAlign::Left, ink, window);
+                for para in &flow.paras {
+                    if para.shown.text.is_empty() {
                         continue;
                     }
-                    most[ci] = most[ci].max(measure(&shown.text, ri == 0, window));
-                    if let Some(word) = longest_word(&shown.text) {
-                        least[ci] = least[ci].max(measure(word, ri == 0, window));
+                    let laid = &para.line.unwrapped_layout;
+                    most[ci] = most[ci].max(f32::from(laid.width));
+                    for word in unbroken(&para.shown.text) {
+                        least[ci] = least[ci].max(f32::from(laid.x_for_index(word.end) - laid.x_for_index(word.start)));
                     }
                 }
             }
         }
         let pad = CELL_X * 2. + 1.;
         let most: Vec<f32> = most.iter().map(|w| (w + pad).max(LEAST_COLUMN)).collect();
-        let least: Vec<f32> = least.iter().zip(&most).map(|(w, m)| (w + pad).max(LEAST_COLUMN).min(*m)).collect();
-        shared(&most, &least, room)
+        let word: Vec<f32> = least.iter().zip(&most).map(|(w, m)| (w + pad).max(LEAST_COLUMN).min(*m)).collect();
+        // A person's shares are of the room, or of as much more as keeps
+        // every column its longest word: then the table scrolls.
+        if let Some(shares) = t.shares.as_ref().filter(|s| s.len() == n) {
+            let total: f32 = shares.iter().sum::<f32>().max(1.);
+            let across = shares.iter().zip(&word).map(|(s, w)| w / (s / total).max(0.01)).fold(room, f32::max);
+            return shares.iter().map(|s| (s / total * across).round().max(LEAST_COLUMN)).collect();
+        }
+        shared(&most, &floors(&most, &word), room)
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -1302,47 +1351,53 @@ fn raised(c: char, up: bool) -> Option<char> {
     (if up { UP } else { DOWN }).iter().find(|(from, _)| *from == c).map(|(_, to)| *to)
 }
 
+/// How narrow each column gives way to: about two lines of its longest
+/// cell (`most`), held between `COLUMN_FLOOR`'s two, never under its
+/// longest word (`word`) and never over what it asks.
+pub(crate) fn floors(most: &[f32], word: &[f32]) -> Vec<f32> {
+    most.iter().zip(word).map(|(m, w)| (m / 2.).clamp(COLUMN_FLOOR.0, COLUMN_FLOOR.1).max(*w).min(*m)).collect()
+}
+
 /// The widths of columns that want `most` and hold at `least`, in `room`.
+/// With no room for `least` they keep it, wider than the room together:
+/// the table scrolls sideways. Squeezed into the room, each column broke
+/// its words a letter a line.
 pub(crate) fn shared(most: &[f32], least: &[f32], room: f32) -> Vec<f32> {
     let (top, bottom): (f32, f32) = (most.iter().sum(), least.iter().sum());
     if top <= room {
         return most.to_vec();
     }
     if bottom >= room {
-        let k = room / bottom.max(1.);
-        return least.iter().map(|w| (w * k).floor()).collect();
+        return least.to_vec();
     }
     let k = (room - bottom) / (top - bottom).max(1.);
     least.iter().zip(most).map(|(l, m)| (l + (m - l) * k).floor()).collect()
 }
 
-/// The longest run that cannot break: a word; a wide character breaks
-/// anywhere, so it is its own.
-pub(crate) fn longest_word(text: &str) -> Option<&str> {
+/// The runs that cannot break, by their bytes: a word, with the no-break
+/// spaces beside it (the room around code's plate, `CODE_PAD`); a wide
+/// character breaks anywhere, so it is its own.
+pub(crate) fn unbroken(text: &str) -> Vec<Range<usize>> {
     let wide = |c: char| (c as u32) >= 0x2E80;
-    let mut best: Option<&str> = None;
+    let space = |c: char| c.is_whitespace() && !matches!(c, '\u{A0}' | '\u{2007}' | '\u{202F}');
+    let mut runs = Vec::new();
     let mut start = None;
-    let mut consider = |a: usize, b: usize| {
-        if best.is_none_or(|w| w.len() < b - a) {
-            best = text.get(a..b);
-        }
-    };
     for (i, c) in text.char_indices() {
-        if c.is_whitespace() || wide(c) {
+        if space(c) || wide(c) {
             if let Some(s) = start.take() {
-                consider(s, i);
+                runs.push(s..i);
             }
             if wide(c) {
-                consider(i, i + c.len_utf8());
+                runs.push(i..i + c.len_utf8());
             }
         } else if start.is_none() {
             start = Some(i);
         }
     }
     if let Some(s) = start {
-        consider(s, text.len());
+        runs.push(s..text.len());
     }
-    best
+    runs
 }
 
 /// The colors of a code line, from its block's reading.
@@ -1380,7 +1435,7 @@ impl HashKey for LineKind {
 #[cfg(test)]
 mod tests {
     use super::super::editor::Look;
-    use super::{longest_word, shared, Reader, Rhythm};
+    use super::{floors, shared, unbroken, Reader, Rhythm};
     use crate::live::lines::{Doc, Pos};
     use crate::live::markdown;
 
@@ -1390,17 +1445,37 @@ mod tests {
         assert_eq!(shared(&[100., 200.], &[50., 50.], 400.), vec![100., 200.]);
         // No room for all: each keeps its word, the rest shared by what it asks.
         assert_eq!(shared(&[100., 300.], &[100., 100.], 300.), vec![100., 200.]);
-        // Not even for the words: down together, and never past the room.
-        let w = shared(&[100., 300.], &[200., 200.], 300.);
-        assert!(w.iter().sum::<f32>() <= 300.);
+        // Not even for what each holds at: they keep it, past the room.
+        assert_eq!(shared(&[100., 300.], &[200., 200.], 300.), vec![200., 200.]);
     }
 
     #[test]
-    fn the_longest_word_is_what_cannot_break() {
-        assert_eq!(longest_word("Pharmacy Medicines"), Some("Medicines"));
-        assert_eq!(longest_word("酮康唑"), Some("酮"));
-        assert_eq!(longest_word("OTC 口腔"), Some("OTC"));
-        assert_eq!(longest_word("   "), None);
+    fn a_column_holds_at_two_lines_of_its_words() {
+        // Half of what it asks, between the two bounds, never under its
+        // longest word and never over what it asks.
+        assert_eq!(floors(&[100., 400., 2000., 300.], &[60., 80., 90., 260.]), vec![100., 200., 480., 260.]);
+    }
+
+    #[test]
+    fn a_grid_scrolls_no_further_than_it_has() {
+        let grid = super::Grid { cols: vec![300., 300.], xs: vec![0., 300.], width: 600., room: 400., slide: Default::default() };
+        assert_eq!((grid.shown(), grid.slack()), (400., 200.));
+        assert!(grid.slide_to(500.));
+        assert_eq!(grid.slide.get(), 200.);
+        assert!(!grid.slide_to(900.));
+        assert!(grid.slide_to(-5.));
+        assert_eq!(grid.slide.get(), 0.);
+    }
+
+    #[test]
+    fn a_word_is_what_cannot_break() {
+        let words = |text: &'static str| unbroken(text).into_iter().map(|r| &text[r]).collect::<Vec<_>>();
+        assert_eq!(words("Pharmacy Medicines"), vec!["Pharmacy", "Medicines"]);
+        assert_eq!(words("酮康唑"), vec!["酮", "康", "唑"]);
+        assert_eq!(words("OTC 口腔"), vec!["OTC", "口", "腔"]);
+        assert!(words("   ").is_empty());
+        // Code's room is part of its word: the two break together or not at all.
+        assert_eq!(words("see \u{202F}\u{202F}a.pdf\u{202F}\u{202F} now"), vec!["see", "\u{202F}\u{202F}a.pdf\u{202F}\u{202F}", "now"]);
     }
 
     #[test]

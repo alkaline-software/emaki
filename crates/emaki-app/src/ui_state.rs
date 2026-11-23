@@ -29,6 +29,8 @@ pub struct UiState {
     pub panel_w: Option<f32>,
     /// How wide the comparison's list of changed files was dragged to.
     pub changes_w: Option<f32>,
+    /// How wide the history's column of a commit's files was dragged to.
+    pub history_files_w: Option<f32>,
     /// How wide the outline's drawer is.
     pub outline_w: Option<f32>,
     /// The list of branches in the order of their names, not by when

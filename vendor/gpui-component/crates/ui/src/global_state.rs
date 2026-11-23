@@ -14,6 +14,9 @@ pub(crate) fn init(cx: &mut App) {
 /// UI-only global state whose types cannot cross into `gpui-base`.
 pub(crate) struct UiGlobalState {
     pub(crate) text_view_state_stack: Vec<Entity<TextViewState>>,
+    /// Emaki: the tables being painted, the innermost last, each with the
+    /// cell of it being painted (`text/cells.rs`).
+    pub(crate) table_spots: Vec<crate::text::TableSpot>,
     selection_document_order: u64,
 }
 
@@ -23,6 +26,7 @@ impl UiGlobalState {
     fn new() -> Self {
         Self {
             text_view_state_stack: Vec::new(),
+            table_spots: Vec::new(),
             selection_document_order: 1,
         }
     }
@@ -37,6 +41,11 @@ impl UiGlobalState {
 
     pub(crate) fn text_view_state(&self) -> Option<&Entity<TextViewState>> {
         self.text_view_state_stack.last()
+    }
+
+    /// Emaki: the table a run of text is being painted in, if it is in one.
+    pub(crate) fn table_spot(&self) -> Option<crate::text::TableSpot> {
+        self.table_spots.last().copied()
     }
 
     pub(crate) fn begin_selection_frame(&mut self) {

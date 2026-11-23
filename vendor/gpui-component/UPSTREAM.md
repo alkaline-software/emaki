@@ -240,10 +240,10 @@ upstream revision finds them.
    dragged to a wide table's left or right edge scrolls the table that
    way, a step a frame, longer the further past the edge the pointer is.
    It begins only with a press on the text and a move with the button
-   held, so the scrollbar is left alone. The text
-   view keeps a selection as points in the window and reads them
-   against the text where it stands, so the selection follows the
-   scroll with nothing else changed.
+   held, so the scrollbar is left alone. The end of the selection
+   that follows the pointer is read against the text where it now
+   stands, so the selection grows as the table scrolls; the end that
+   was put stays on its words (85).
 32. `crates/ui/src/highlighter/highlighter.rs`
    (`MAX_INLINE_INJECTION_PARSES`): markdown's inline content is parsed
    a block at a time, up to a budget of its own, past which the rest are
@@ -377,6 +377,8 @@ upstream revision finds them.
 83. `crates/ui/src/text/find.rs` (`TextHits`, `TextAt`), `text_view.rs` (`TextView::hits`), `state.rs`, `inline.rs` (`paint`): a view handed a `TextHits` keeps where each run of its words was painted, its layout and its text, so the application can ask which letter is under a point.
 
 84. `crates/base/src/tooltip.rs` (`TooltipOverlay::claim_by`, `held`, `request_hide_from`, `pending`), `crates/ui/src/tooltip.rs` (`managed_tooltip`'s prepaint and its hover's end): a trigger lays a hitbox of its own and claims with it, and the overlay keeps the last one that claimed: the pointer on it keeps the tooltip in a frame that claims nothing. A view the window replays from its cache (the sidebar) lays nothing out, so its triggers never claimed past the frame the pointer came in, and every tooltip in it went before it showed (entry 30's rule); a replay keeps the hitboxes with their ids. A hover's end hides only its own trigger's tooltip, shown or waiting: the pointer carried in one move from a trigger in one view onto one in another is heard entering the second first, and the first one's end hid the new tooltip.
+85. `crates/ui/src/text/cells.rs` (new), `node.rs` (`render_scroll_table`'s `table_mark` and `cell_mark`, a table's selected text), `inline.rs` (`layout_selections`), `global_state.rs` (`table_spots`), `state.rs` and `selection_adapter.rs` (`selection_ends`, `multi_click_points`): a table's cells in the selection. A table and each of its cells say where they are painted while their words paint, and a run of text in a cell takes the band between the selection's two points only when both are in its cell; with the ends in two cells every cell of the block between them is whole, and with one end outside the table whole rows are, to the table's edge that way. Upstream takes every letter in the band across the whole width, which in a table selects in the cells beside the one dragged in. An end put at a table's height is kept with the table's scroll (`TableSel`, by the point the selection keeps for it) and moved by as much as the table scrolls after, and a double click's point the same; the end still following the pointer is not moved. Upstream reads both ends where they are in the window, so a sideways scroll moved the selection onto other words. A selection's cells are copied with a tab between them and a row with none of it is left out; upstream joined every cell of every row with spaces. The module's tests are not run from the repository's root (`docs/platform.md`).
+
 ## Updating
 
 Check out the new upstream revision, copy the four crates over these, re-apply

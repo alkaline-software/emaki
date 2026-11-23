@@ -114,7 +114,7 @@ const PIN_H: Pixels = px(30.);
 /// fit inside the card.
 pub(crate) const CONVERSATION_MIN: Pixels = px(480.);
 /// How wide the strip at the panel's edge that takes the drag is.
-const PANEL_GRIP: Pixels = px(8.);
+pub(crate) const PANEL_GRIP: Pixels = px(8.);
 /// In a folder of checkouts, the panel width from which the branch is
 /// named in the head beside the checkout.
 const NAMED_BRANCH_AT: Pixels = px(300.);
@@ -133,13 +133,53 @@ const BRANCH_ROW_H: Pixels = px(30.);
 /// The column a branch's tag stands in, and the one its time does.
 const BRANCH_TAG_W: Pixels = px(72.);
 const BRANCH_WHEN_W: Pixels = px(100.);
+/// What a file is set in from its pane's edges: at the sides, and at
+/// the top and the foot. A table's grid has none.
+pub(crate) const FILE_PAD: (f32, f32) = (18., 16.);
 /// The comparison: how wide its list of files is, and how tall a row of
 /// that list.
 pub(crate) const CHANGES_LIST_W: Pixels = px(300.);
 /// The list of changed files is dragged between these, and what is left
 /// is the lines'.
-const CHANGES_LIST_MIN: Pixels = px(200.);
-const CHANGES_LINES_MIN: Pixels = px(320.);
+pub(crate) const CHANGES_LIST_MIN: Pixels = px(200.);
+pub(crate) const CHANGES_LINES_MIN: Pixels = px(320.);
+/// What stands around a path on a changed file's row, between its
+/// column's edges: the list's inset and the row's padding on both sides,
+/// the icon, the gaps, the letter and the column's line. A row of the
+/// comparison has its box and a gap more.
+pub(crate) const PATH_CHROME: f32 = 12. + 16. + 16. + 12. + 12. + 1.;
+const TICK_CHROME: f32 = 15. + 6.;
+
+/// How wide words are drawn in a list's face, at a row's size.
+pub(crate) fn list_words_w(text: &str, weight: FontWeight, window: &Window, cx: &App) -> f32 {
+    let font = Font { weight, ..font(cx.theme().font_family.clone()) };
+    let run = TextRun { len: text.len(), font, color: gpui::black(), background_color: None, underline: None, strikethrough: None };
+    f32::from(window.text_system().shape_line(text.to_string().into(), px(12.5), &[run], None).width)
+}
+
+/// A changed file's folders and its name on a row. The folders give way
+/// first and all the way, then the name itself ends in "…": neither runs
+/// under the letter beside them.
+pub(crate) fn path_words(folder: String, name: String, quiet: Hsla, ink: Hsla) -> Div {
+    h_flex()
+        .flex_1()
+        .min_w_0()
+        .overflow_hidden()
+        .when(!folder.is_empty(), |d| {
+            d.child(
+                div()
+                    .min_w_0()
+                    .map(|mut d| {
+                        d.style().flex_shrink = Some(1000.);
+                        d
+                    })
+                    .truncate()
+                    .text_color(quiet)
+                    .child(folder),
+            )
+        })
+        .child(div().min_w_0().truncate().text_color(ink).child(name))
+}
 /// What stands in the lines' place when there are none: a mark and a
 /// sentence in the middle of the canvas.
 fn no_lines(icon: &'static str, said: String, more: String, theme: &gpui_component::Theme) -> AnyElement {
@@ -1652,20 +1692,36 @@ fn picture_compare(p: &git::Pictures, drawn: &[Option<Arc<gpui::Image>>; 2], kep
                         .child(div().min_w_0().truncate().text_color(theme.muted_foreground).child(size)),
                 )
                 .child(
+                    // The picture's box is the plate's inside, laid over
+                    // it, and the picture is drawn whole in that. As a
+                    // child in the plate's flow it took the plate's
+                    // width and the height its shape gives that width
+                    // (gpui gives a picture its shape as an aspect
+                    // ratio, and the flow hands it no height to keep),
+                    // so a wide picture in a low sheet ran out under
+                    // the plate and past the sheet's foot.
                     div()
+                        .relative()
                         .flex_1()
                         .min_h_0()
-                        .p(px(16.))
                         .rounded(px(10.))
                         .border_1()
                         .border_color(theme.border)
                         .bg(if dark { theme.sidebar } else { theme.muted.opacity(0.4) })
-                        .child(img(match kept {
-                            Some(kept) => crate::pictures::through(kept, ImageSource::Image(image), 0),
-                            None => ImageSource::Image(image),
-                        })
-                        .size_full()
-                        .object_fit(ObjectFit::ScaleDown)),
+                        .overflow_hidden()
+                        .child(
+                            div().absolute().inset(px(16.)).child(
+                                img(match kept {
+                                    Some(kept) => crate::pictures::through(kept, ImageSource::Image(image), 0),
+                                    None => ImageSource::Image(image),
+                                })
+                                .absolute()
+                                .top_0()
+                                .left_0()
+                                .size_full()
+                                .object_fit(ObjectFit::ScaleDown),
+                            ),
+                        ),
                 ),
         )
     };
@@ -3002,15 +3058,17 @@ impl Workbench {
     /// leaves the lines their room.
     pub(crate) fn changes_fit(&self, window: &Window, cx: &App) -> Pixels {
         let Some(c) = &self.changes else { return CHANGES_LIST_W };
-        let font = font(cx.theme().font_family.clone());
-        let measure = |text: &str| {
-            let run = TextRun { len: text.len(), font: font.clone(), color: gpui::black(), background_color: None, underline: None, strikethrough: None };
-            f32::from(window.text_system().shape_line(text.to_string().into(), px(12.5), &[run], None).width)
+        // What is around the words (`PATH_CHROME`), and a little air.
+        let widest = if c.history {
+            // The history's column is the commits', each row's inset and
+            // padding on both sides; in a window where the commit's
+            // files stand under them, theirs too.
+            let commits = self.history_commits_w(window, cx) + 12. + 20. + 1. + 8.;
+            let files = if self.history_wide() { 0. } else { self.history_paths_w(window, cx) + PATH_CHROME + 8. };
+            commits.max(files)
+        } else {
+            self.change_rows().iter().filter_map(|i| self.tree.changed.get(*i)).map(|(p, _)| list_words_w(&p.strip_prefix(&c.root).unwrap_or(p).to_string_lossy(), FontWeight::NORMAL, window, cx) + PATH_CHROME + TICK_CHROME + 8.).fold(0f32, f32::max)
         };
-        // Around a path: the row's inset and padding on both sides, the
-        // box, the icon, the gaps, the letter, the column's edge and a
-        // little air.
-        let widest = self.change_rows().iter().filter_map(|i| self.tree.changed.get(*i)).map(|(p, _)| measure(&p.strip_prefix(&c.root).unwrap_or(p).to_string_lossy()) + 12. + 16. + 15. + 16. + 18. + 12. + 1. + 8.).fold(0f32, f32::max);
         let most = (self.changes_sheet.get().size.width * 0.6).max(CHANGES_LIST_MIN);
         px(widest.ceil()).clamp(CHANGES_LIST_MIN, most)
     }
@@ -9025,7 +9083,7 @@ impl Workbench {
     /// The comparison: a sheet over the window, the changed files at
     /// its left and the picked one's lines at its right, what was beside
     /// what is, as GitHub Desktop sets them.
-    pub(crate) fn render_changes(&self, cx: &mut Context<Self>) -> AnyElement {
+    pub(crate) fn render_changes(&self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
         let theme = cx.theme().clone();
         let Some(c) = &self.changes else { return div().into_any_element() };
         let dark = theme.mode.is_dark();
@@ -9045,7 +9103,9 @@ impl Workbench {
         let repo_pill = self.repo_pill("changes-repo-pill", cx);
         let files = uniform_list("changes-files", rows.len(), {
             let (changed, root, marked, rows) = (changed.clone(), root.clone(), marked.clone(), rows.clone());
-            move |range: std::ops::Range<usize>, _: &mut Window, _: &mut App| {
+            // The room a row has for its path.
+            let path_room = f32::from(self.changes_w_now()) - PATH_CHROME - TICK_CHROME;
+            move |range: std::ops::Range<usize>, window: &mut Window, cx: &mut App| {
                 range
                     .map(|ix| {
                         let (at, fx) = (ix, rows[ix]);
@@ -9104,12 +9164,14 @@ impl Workbench {
                                 cx.stop_propagation();
                                 menu_entity.update(cx, |this, cx| this.changes_menu(menu_path.clone(), e.position, cx)).ok();
                             })
+                            // A path that is cut is whole under the pointer.
+                            .when(list_words_w(&rel, FontWeight::NORMAL, window, cx) > path_room, |d| {
+                                let whole = rel.clone();
+                                d.managed_tooltip(move |window, cx| crate::workbench::tip(whole.clone(), window, cx))
+                            })
                             .child(tick)
                             .child(img(crate::file_icons::path(&name, false, false, dark)).size(px(16.)).flex_shrink_0())
-                            // The folders give way first; a name too long
-                            // by itself is cut too, and never runs under
-                            // the letter beside it.
-                            .child(h_flex().flex_1().min_w_0().overflow_hidden().when(!folder.is_empty(), |d| d.child(div().min_w_0().map(|mut d| { d.style().flex_shrink = Some(1000.); d }).truncate().text_color(quiet).child(folder))).child(div().min_w_0().truncate().text_color(ink).child(name)))
+                            .child(path_words(folder, name, quiet, ink))
                             .child(div().w(px(12.)).flex_shrink_0().flex().justify_center().text_size(px(11.)).text_color(tint).children(state.letter()));
                         // The list gives a row its whole width; the plate is inset from it.
                         div().w_full().h(CHANGE_ROW_H).px(px(6.)).child(row).into_any_element()
@@ -9337,7 +9399,7 @@ impl Workbench {
                             .child(Button::new("changes-close").ghost().small().icon(IconName::Close).on_click(cx.listener(|this, _, _, cx| this.close_changes(cx)))),
                     )
                     .child(if c.history {
-                        self.render_history(body, counts, cx)
+                        self.render_history(body, counts, window, cx)
                     } else {
                         h_flex()
                             .flex_1()
@@ -9485,7 +9547,7 @@ impl Workbench {
         let big = self.file_big;
         // A table's grid runs to the pane's edges.
         let grid = (matches!(v.body, FileBody::Table(..)) && !self.file_raw) || matches!(v.body, FileBody::Sheets(_));
-        let (pad_x, pad_y) = if grid { (0., 0.) } else { (18., 16.) };
+        let (pad_x, pad_y) = if grid { (0., 0.) } else { FILE_PAD };
         // A PDF's pages give the list beside them its room.
         let beside = if matches!(v.body, FileBody::Pages(Some(_))) && self.pdf_side.is_some() { PDF_SIDE_W } else { 0. };
         let room = (f32::from(w) - beside - 2. * pad_x - 1.).max(120.);
@@ -10987,6 +11049,15 @@ impl Workbench {
                 }
             }
             "changesfit" => self.changes_fit_wanted = true,
+            // The same of the divider beside a commit's files, in the history.
+            t if t.starts_with("historyw:") => {
+                if let Ok(w) = t["historyw:".len()..].parse::<f32>() {
+                    self.history_files_w = px(w);
+                    self.history_files_w = self.history_files_w_now();
+                    self.save_ui(true);
+                }
+            }
+            "historyfit" => self.history_files_fit_wanted = true,
             t if t.starts_with("panelw:") => {
                 if let (Ok(w), true) = (t["panelw:".len()..].parse::<f32>(), self.files_on) {
                     self.panel_drag = true;
@@ -11124,6 +11195,15 @@ impl Workbench {
                     cx.notify();
                 }
             }
+            // wheelx:<x>:<y>:<dx> is a sideways stroke of that many points
+            // there: less than none shows what lies to the right.
+            t if t.starts_with("wheelx:") => {
+                let n: Vec<f32> = t["wheelx:".len()..].split(':').filter_map(|v| v.parse().ok()).collect();
+                if let [x, y, dx] = n[..] {
+                    self.pending_sideways.push((point(px(x), px(y)), dx));
+                    cx.notify();
+                }
+            }
             // A flick begun at one place, its momentum carried to
             // another: flick:<x>:<y>:<x2>:<y2>, toward the top, or with
             // :down toward the foot. It prints what moved.
@@ -11154,6 +11234,11 @@ impl Workbench {
             "seltext" => {
                 self.pending_seltext = true;
                 cx.notify();
+            }
+            // What the composer holds and where its caret or selection is.
+            "composercaret" => {
+                let s = self.composer.read(cx);
+                eprintln!("emaki: composer {:?} selection {:?}", s.value(), s.selected_range());
             }
             "treecaret" => {
                 let s = self.tree_input.read(cx);

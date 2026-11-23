@@ -285,7 +285,18 @@ impl BlockNode {
                                 _ => cell.children.selected_text(),
                             });
                         }
-                        if !row_texts.is_empty() {
+                        // Emaki: a selection's cells with a tab between
+                        // them, as a spreadsheet copies its own, and a row
+                        // with none of it left out: a row was its cells
+                        // joined by spaces, so one word copied from a cell
+                        // came with a space for every other cell.
+                        if matches!(kind, BlockTextKind::Selected) {
+                            row_texts.retain(|cell| !cell.is_empty());
+                            if !row_texts.is_empty() {
+                                block_text.push_str(&row_texts.join("\t"));
+                                block_text.push('\n');
+                            }
+                        } else if !row_texts.is_empty() {
                             block_text.push_str(&row_texts.join(" "));
                             block_text.push('\n');
                         }
@@ -2845,6 +2856,9 @@ impl BlockNode {
         // A selection dragged to an edge of the table scrolls it that way,
         // as a code block's does. (Emaki addition.)
         let drag = window.use_keyed_state(SharedString::from(format!("{table_scroll_key}-drag")), cx, |_, _| CodeDrag::default());
+        // The selection's ends as this table last saw them, so they go
+        // with its scroll (`cells.rs`). (Emaki addition.)
+        let cells = window.use_keyed_state(SharedString::from(format!("{table_scroll_key}-cells")), cx, |_, _| super::cells::TableSel::default());
         let scroll_handle = window
             .use_keyed_state(table_scroll_key, cx, |_, _| ScrollHandle::default())
             .read(cx)
@@ -2858,7 +2872,9 @@ impl BlockNode {
                 let is_last_col = ix == row.children.len() - 1;
                 let width = col_w.get(ix).copied().unwrap_or(CELL_MIN_PX);
                 let min_width = col_min_w.get(ix).copied().unwrap_or(CELL_MIN_PX);
-                cells.push(
+                // A cell is a unit of the selection (`cells.rs`). (Emaki
+                // addition.)
+                cells.push(super::cells::cell_mark(
                     div()
                         .id(("cell", ix))
                         // Measured max-content width is the flex-basis;
@@ -2881,7 +2897,7 @@ impl BlockNode {
                         })
                         .refine_style(&style.table_cell)
                         .child(cell.children.render(node_cx, window, cx)),
-                );
+                ));
             }
             rows.push(
                 div()
@@ -2941,7 +2957,7 @@ impl BlockNode {
                         // (overflow-x is handled by `ScrollableMask`, so
                         // vertical wheel events keep bubbling to the parent
                         // TextView).
-                        horizontal_scroll_area(
+                        super::cells::table_mark(cells, scroll_handle.clone(), horizontal_scroll_area(
                             ("table", options.ix),
                             &scroll_handle,
                             &viewport,
@@ -2952,7 +2968,7 @@ impl BlockNode {
                             // once they are reached, letting the track exceed
                             // the viewport and scroll.
                             div().min_w_full().w(px(min_total_w)).children(rows),
-                        ),
+                        )),
                     )
                     .when(at > px(1.), |d| d.child(fade(true)))
                     .when(most - at > px(1.), |d| d.child(fade(false)))

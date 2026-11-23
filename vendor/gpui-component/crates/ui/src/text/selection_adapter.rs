@@ -220,6 +220,16 @@ impl TextViewSelectionAdapter {
         Some((points.anchor(), points.cursor()))
     }
 
+    /// Emaki: both ends of the selection, the anchor first: the point the
+    /// selection keeps for each, the same until the end is put elsewhere,
+    /// with where it is in the window now; and whether the drag is still
+    /// on (`cells.rs`).
+    pub(super) fn selection_ends(&self, cx: &App) -> Option<([(Point<Pixels>, Point<Pixels>); 2], bool)> {
+        let snapshot = self.selection.snapshot(cx)?;
+        let points = snapshot.window_points()?;
+        Some(([(snapshot.anchor().content_point(), points.anchor()), (snapshot.cursor().content_point(), points.cursor())], snapshot.is_selecting()))
+    }
+
     pub(super) fn set_local_selection(&self, active: bool, cx: &mut App) {
         self.selection.set_local_selection(active, cx);
     }

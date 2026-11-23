@@ -752,6 +752,9 @@ pub const HOME_FOLDERS: usize = 4;
 /// The composer grows with its text between these row counts.
 pub const COMPOSER_MIN_ROWS: usize = 3;
 pub const COMPOSER_MAX_ROWS: usize = 12;
+/// The composer's words set in from its room's edges: at the sides, and
+/// at the top and the foot.
+const COMPOSER_PAD: (f32, f32) = (10.5, 7.5);
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Scope {
@@ -2319,6 +2322,11 @@ pub struct Workbench {
     pub(crate) changes_drag: bool,
     pub(crate) changes_sheet: Rc<std::cell::Cell<Bounds<Pixels>>>,
     pub(crate) changes_fit_wanted: bool,
+    /// The same of the history's column of a commit's files, where it has
+    /// one: its width, whether its divider is held, a double click on it.
+    pub(crate) history_files_w: Pixels,
+    pub(crate) history_files_drag: bool,
+    pub(crate) history_files_fit_wanted: bool,
     /// The picture showing that would not read, and for each picture
     /// looked at, the file's time as it was read and how many times it
     /// has been read again (`picture_tick`).
@@ -2634,6 +2642,8 @@ pub struct Workbench {
     /// Where `EMAKI_GO=pointer:<x>:<y>` moves the pointer to.
     /// None a move, Some(0) a click, Some(dy) a scroll of dy points.
     pub(crate) pending_pointer: Vec<(Point<Pixels>, Option<f32>)>,
+    /// A probe's sideways strokes of the wheel still to send: where, and how far (`wheelx:`).
+    pub(crate) pending_sideways: Vec<(Point<Pixels>, f32)>,
     /// A probe's flicks (`flick:`): a gesture begun at the first place
     /// whose momentum is carried to the second.
     pub(crate) pending_flick: Vec<(Point<Pixels>, Point<Pixels>, f32)>,
@@ -3917,6 +3927,10 @@ impl Workbench {
         };
 
         let composer = cx.new(crate::live::Editor::new);
+        // A press anywhere in the composer's room is the editor's: in the
+        // padding beside the words, and under them in a room taller than
+        // they are (`COMPOSER_PAD`, `render_composer`).
+        composer.update(cx, |e, _| e.set_press_room(Edges { top: px(COMPOSER_PAD.1), right: px(COMPOSER_PAD.0), bottom: px(10_000.), left: px(COMPOSER_PAD.0) }));
         let search_input = cx.new(|cx| InputState::new(window, cx));
         let find_input = cx.new(|cx| InputState::new(window, cx));
 
@@ -4759,6 +4773,9 @@ impl Workbench {
             changes_drag: false,
             changes_sheet: Default::default(),
             changes_fit_wanted: false,
+            history_files_w: ui.history_files_w.map(px).unwrap_or(crate::branches::HISTORY_FILES_W),
+            history_files_drag: false,
+            history_files_fit_wanted: false,
             picture_failed: Default::default(),
             picture_read: HashMap::new(),
             panel_fit_wanted: false,
@@ -4900,6 +4917,7 @@ impl Workbench {
             pending_tree_focus: false,
             pending_press: Vec::new(),
             pending_pointer: Vec::new(),
+            pending_sideways: Vec::new(),
             pending_flick: Vec::new(),
             pending_drag: Vec::new(),
             pending_seltext: false,
@@ -7283,6 +7301,7 @@ impl Workbench {
             files_open: Some(self.files_on || self.side_away.contains(&crate::panels::Side::Left)),
             panel_w: Some(f32::from(self.panel_w)),
             changes_w: Some(f32::from(self.changes_w)),
+            history_files_w: Some(f32::from(self.history_files_w)),
             term_w: Some(f32::from(self.side_term_w)),
             file_w: Some(f32::from(self.file_w)),
             file_structure_open: Some(self.file_structure_open),
@@ -18845,6 +18864,9 @@ impl Workbench {
         // A block of code is set into the card: the page's ground, a
         // shade under the composer's.
         look.colors.plate = theme.background;
+        // What the words stand on is the card: a table wider than the
+        // composer fades into it at a cut side.
+        look.colors.ground = theme.popover;
         look.text_px = composer_px;
         look.line_px = composer_line;
         // Strong words as the conversation sets them.
@@ -19300,7 +19322,7 @@ impl Workbench {
                     // with them between the fewest rows and the most, and
                     // scrolls past that. Set in from the edges as the
                     // toolkit's field set its words, where the hint is.
-                    .child(div().id("composer-room").w_full().min_h(px(composer_line * COMPOSER_MIN_ROWS as f32 + 15.)).max_h(px(composer_line * COMPOSER_MAX_ROWS as f32 + 15.)).overflow_y_scroll().track_scroll(&composer_scroll).px(px(10.5)).py(px(7.5)).cursor_text().child(self.composer.clone()))
+                    .child(div().id("composer-room").w_full().min_h(px(composer_line * COMPOSER_MIN_ROWS as f32 + 15.)).max_h(px(composer_line * COMPOSER_MAX_ROWS as f32 + 15.)).overflow_y_scroll().track_scroll(&composer_scroll).px(px(COMPOSER_PAD.0)).py(px(COMPOSER_PAD.1)).cursor_text().child(self.composer.clone()))
                     .children(self.render_composer_hint(cx)),
             )
             .child(
@@ -21387,6 +21409,12 @@ impl Render for Workbench {
                 }
             });
         }
+        for (at, dx) in std::mem::take(&mut self.pending_sideways) {
+            window.defer(cx, move |window, cx| {
+                window.dispatch_event(gpui::PlatformInput::MouseMove(MouseMoveEvent { position: at, pressed_button: None, modifiers: Modifiers::default() }), cx);
+                window.dispatch_event(gpui::PlatformInput::ScrollWheel(ScrollWheelEvent { position: at, delta: ScrollDelta::Pixels(point(px(dx), px(0.))), modifiers: Modifiers::default(), touch_phase: TouchPhase::Started }), cx);
+            });
+        }
         // A drag, let go at its end or held there (`holdat`) until a
         // `letgo`, which is a drag from and to the same place, let go.
         for (from, to, release) in std::mem::take(&mut self.pending_drag) {
@@ -21473,6 +21501,10 @@ impl Render for Workbench {
             self.changes_w = self.changes_fit(window, cx);
             self.save_ui(true);
         }
+        if std::mem::take(&mut self.history_files_fit_wanted) {
+            self.history_files_w = self.history_files_fit(window, cx);
+            self.save_ui(true);
+        }
         if std::mem::take(&mut self.panel_fit_wanted) {
             self.panel_w = self.panel_fit(window, cx);
         }
@@ -21535,6 +21567,8 @@ impl Render for Workbench {
                                             w.file_drag_to(e, cx);
                                         } else if w.changes_drag {
                                             w.changes_drag_to(e, cx);
+                                        } else if w.history_files_drag {
+                                            w.history_files_drag_to(e, cx);
                                         } else if let Some(agent) = w.term_selecting() {
                                             // A terminal's selection follows the pointer
                                             // past the terminal, scrolling it.
@@ -21555,6 +21589,7 @@ impl Render for Workbench {
                                     w.side_drag_end();
                                     w.panel_drag_end();
                                     w.changes_drag_end();
+                                    w.history_files_drag_end();
                                     if std::mem::take(&mut w.file_drag) {
                                         w.save_ui(true);
                                     }
@@ -21692,7 +21727,7 @@ impl Render for Workbench {
             .children(self.render_rail_fly(window, cx))
             .children(self.csd_chrome(window, cx))
             .when(search_open, |d| d.child(self.render_search(cx)))
-            .when(self.changes.is_some(), |d| d.child(fade_in("changes-in", self.render_changes(cx))))
+            .when(self.changes.is_some(), |d| d.child(fade_in("changes-in", self.render_changes(window, cx))))
             .when_some(self.lightbox.clone(), |d, lb| d.child(fade_in("lightbox-in", self.render_lightbox(lb, cx))))
             // The sheet, when the name was asked for where there is no
             // row and no tab to write it in, or neither is drawn.

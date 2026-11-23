@@ -309,6 +309,10 @@ impl Default for Look {
 
 /// A table's corners, as a code plate's.
 const TABLE_R: f32 = 8.;
+/// How far in from a cut side a table's rows fade.
+const TABLE_FADE: f32 = 36.;
+/// How long after a wheel's last move the next one is a new gesture.
+const WHEEL_GAP: Duration = Duration::from_millis(120);
 const BLINK: Duration = Duration::from_millis(530);
 /// The caret's width.
 const CARET_W: f32 = 1.5;
@@ -364,6 +368,9 @@ pub(crate) struct Editor {
     /// How far the caret is kept from the top and foot of what shows: the
     /// height of the scroller's edge fade, where it has one.
     scroll_margin: f32,
+    /// How far past its box, each way, a press is still the editor's: the
+    /// padding of the room it stands in (`set_press_room`).
+    press_room: Edges<Pixels>,
     cache: Rc<RefCell<Cache>>,
     /// An input method's composition: what it has put in so far.
     marked: Option<(Pos, Pos)>,
@@ -413,6 +420,10 @@ pub(crate) struct Editor {
     /// Where the pointer is in a table, and a drag of its edges or handles.
     hover: Option<cells::Hover>,
     table_drag: Option<cells::TableDrag>,
+    /// The wheel's gesture under way: the table it scrolls sideways, by
+    /// its first line, or none when it is the page's, and when it last
+    /// moved (`wheel`).
+    wheel_on: Option<(Option<usize>, Instant)>,
     /// A table's columns as a drag has them: its first line, and each width.
     hold: Option<(usize, Vec<f32>)>,
 }
@@ -544,6 +555,7 @@ impl Editor {
             version: 0,
             scroll: ScrollHandle::new(),
             scroll_margin: 0.,
+            press_room: Edges::default(),
             cache: Rc::new(RefCell::new(Cache::default())),
             marked: None,
             blink_at: Instant::now(),
@@ -569,6 +581,7 @@ impl Editor {
             decor_for: String::new(),
             hover: None,
             table_drag: None,
+            wheel_on: None,
             hold: None,
         }
     }
@@ -944,6 +957,16 @@ impl Editor {
     /// around the editor: the height of its edge fade, where it has one.
     pub fn set_scroll_margin(&mut self, margin: f32) {
         self.scroll_margin = margin.max(0.);
+    }
+
+    /// How far past the editor's box a press is still its own: the room
+    /// around it where the pointer is the words' pointer. A press there
+    /// is taken at the nearest place in the box, so beside a line the
+    /// caret goes to that line's end or start, and above the first line
+    /// or under the last into that line, under the pointer. What the
+    /// scroller around the editor cuts off is out of reach.
+    pub fn set_press_room(&mut self, room: Edges<Pixels>) {
+        self.press_room = room;
     }
 
     /// The view's own styles over the words, by bytes of the text as it
@@ -2197,7 +2220,7 @@ impl Editor {
                 let c = t.column_of(p.col);
                 let flow = t.cells.get(c)?;
                 let (x, y) = flow.caret(p.col);
-                CaretAt::new(t.inset + t.grid.xs.get(c)? + CELL_X + x, top + t.cell_y + y, flow.line_h, flow.caret_h)
+                CaretAt::new(t.left() + t.grid.xs.get(c)? + CELL_X + x, top + t.cell_y + y, flow.line_h, flow.caret_h)
             }
             Row::Rule { inset, line_h } => CaretAt::new(*inset, top, *line_h, Rhythm::caret(self.look.text_px, *line_h)),
             // A short blank line's caret is a line's, over its middle.
@@ -2267,9 +2290,11 @@ impl Editor {
                 Pos::new(line, col.min(text_len))
             }
             Row::Table(t) => {
-                let c = t.column_at(x - t.inset);
+                // Beside the table, the column at that edge of what shows.
+                let x = t.within(x) - t.left();
+                let c = t.column_at(x);
                 let flow = t.cells.get(c)?;
-                Pos::new(line, flow.col_at(x - t.inset - t.grid.xs.get(c)? - CELL_X, y - top - t.cell_y).min(text_len))
+                Pos::new(line, flow.col_at(x - t.grid.xs.get(c)? - CELL_X, y - top - t.cell_y).min(text_len))
             }
             // A piece's row: a place inside it, which takes it whole.
             Row::Pad { .. } if self.shut.iter().any(|(f, _, _)| *f == line) => Pos::new(line, self.doc.line(line).chars().next().map_or(0, |c| c.len_utf8())),
@@ -2300,8 +2325,9 @@ impl Editor {
                 r.flow.link_at(x - r.inset, y - top - r.top_pad).map(Hit::Link)
             }
             Row::Table(t) => {
-                let c = t.column_at(x - t.inset);
-                t.cells.get(c)?.link_at(x - t.inset - t.grid.xs.get(c)? - CELL_X, y - top - t.cell_y).map(Hit::Link)
+                let x = t.within(x) - t.left();
+                let c = t.column_at(x);
+                t.cells.get(c)?.link_at(x - t.grid.xs.get(c)? - CELL_X, y - top - t.cell_y).map(Hit::Link)
             }
             _ => None,
         }
@@ -2518,6 +2544,9 @@ struct Prepainted {
     /// The hitbox with room each side for a table's handles, which stand
     /// out in the margin.
     wide: Hitbox,
+    /// The box with the room around it where a press is still the
+    /// editor's (`Editor::set_press_room`).
+    near: Hitbox,
     /// The pieces in sight, laid out over their rows, and those the
     /// selection holds whole, to be washed in its color.
     pieces: Vec<AnyElement>,
@@ -2549,8 +2578,12 @@ struct PaintInfo {
     marked: Option<(Pos, Pos)>,
     caret: Option<Bounds<Pixels>>,
     find: Rc<Vec<(Pos, Pos)>>,
-    /// The cell the caret is in, from the element's top left.
-    cell: Option<Bounds<Pixels>>,
+    /// The cell the caret is in, from the element's top left, and what
+    /// shows of its table, which it is drawn inside.
+    cell: Option<(Bounds<Pixels>, Bounds<Pixels>)>,
+    /// What shows of each table that is cut at a side, from the element's
+    /// top left, with whether more lies past its left and its right.
+    cuts: Vec<(Bounds<Pixels>, bool, bool)>,
     controls: Option<Controls>,
     /// Where a dragged row or column would go: a line, from the element's top left.
     drop_line: Option<Bounds<Pixels>>,
@@ -2670,19 +2703,23 @@ fn paint_row(row: &Row, ox: f32, oy: f32, height: f32, full_w: Pixels, line: usi
             window.paint_quad(fill(b, inks.border));
         }
         Row::Table(t) => {
-            let left = ox + t.inset;
-            let total = t.grid.width;
-            if !t.head {
-                window.paint_quad(fill(Bounds::new(point(px(left), px(oy)), size(px(total), px(1.))), inks.border));
-            }
-            for (c, flow) in t.cells.iter().enumerate() {
-                let Some(at) = t.grid.xs.get(c) else { continue };
-                let x = left + at;
-                if c > 0 {
-                    window.paint_quad(fill(Bounds::new(point(px(x), px(oy)), size(px(1.), px(t.height))), inks.border));
+            // What shows of a table wider than its room, its columns
+            // scrolled under that: nothing of it is drawn past its frame.
+            let frame = Bounds::new(point(px(ox + t.inset), px(oy)), size(px(t.grid.shown()), px(t.height)));
+            let left = ox + t.left();
+            window.with_content_mask(Some(ContentMask { bounds: frame }), |window| {
+                if !t.head {
+                    window.paint_quad(fill(Bounds::new(frame.origin, size(frame.size.width, px(1.))), inks.border));
                 }
-                paint_flow(flow, point(px(x + CELL_X), px(oy + t.cell_y)), line, false, info, window, cx);
-            }
+                for (c, flow) in t.cells.iter().enumerate() {
+                    let Some(at) = t.grid.xs.get(c) else { continue };
+                    let x = left + at;
+                    if c > 0 {
+                        window.paint_quad(fill(Bounds::new(point(px(x), px(oy)), size(px(1.), px(t.height))), inks.border));
+                    }
+                    paint_flow(flow, point(px(x + CELL_X), px(oy + t.cell_y)), line, false, info, window, cx);
+                }
+            });
         }
     }
 }
@@ -2752,13 +2789,12 @@ fn paint_controls(c: &Controls, ox: f32, oy: f32, inks: &Colors, window: &mut Wi
     strip(Bounds::new(point(px(left), px(bottom + ADD_GAP)), size(px(right - left), px(ADD))), c.on == Some(Control::AddRow), window, cx);
     let row_mid = oy + (c.row.0 + c.row.1) / 2.;
     grip(Bounds::new(point(px(left - GRIP_SHORT / 2.), px(row_mid - GRIP_LONG / 2.)), size(px(GRIP_SHORT), px(GRIP_LONG))), true, matches!(c.on, Some(Control::RowGrip(_))), window);
-    if let (Some(x), Some(w)) = (b.grid.xs.get(c.col), b.grid.cols.get(c.col)) {
-        let mid = left + x + w / 2.;
+    if let Some(mid) = b.column_mid(c.col).map(|mid| ox + mid) {
         grip(Bounds::new(point(px(mid - GRIP_LONG / 2.), px(top - GRIP_SHORT / 2.)), size(px(GRIP_LONG), px(GRIP_SHORT))), false, matches!(c.on, Some(Control::ColumnGrip(_))), window);
     }
     if let Some(Control::Edge(col)) = c.on {
-        if let (Some(x), Some(w)) = (b.grid.xs.get(col), b.grid.cols.get(col)) {
-            window.paint_quad(fill(Bounds::new(point(px(left + x + w - 1.), px(top)), size(px(2.), px(bottom - top))), inks.accent));
+        if let Some(x) = b.edge(col) {
+            window.paint_quad(fill(Bounds::new(point(px(ox + x - 1.), px(top)), size(px(2.), px(bottom - top))), inks.accent));
         }
     }
 }
@@ -2825,11 +2861,15 @@ impl Element for EditorElement {
         let hitbox = window.insert_hitbox(bounds, HitboxBehavior::Normal);
         let far = px(cells::ADD + cells::ADD_GAP + 4.);
         let wide = window.insert_hitbox(Bounds::new(point(bounds.origin.x - far, bounds.origin.y), size(bounds.size.width + far * 2., bounds.size.height + far)), HitboxBehavior::Normal);
+        let reach = self.editor.read(cx).press_room;
+        let near = window.insert_hitbox(Bounds::new(point(bounds.origin.x - reach.left, bounds.origin.y - reach.top), size(bounds.size.width + reach.left + reach.right, bounds.size.height + reach.top + reach.bottom)), HitboxBehavior::Normal);
         let moved = self.editor.update(cx, |e, _| {
             e.origin = bounds.origin;
             e.painted = true;
             let reached = e.take_reach(bounds);
-            (e.want_scroll && e.scroll_to_caret(bounds, window)) || reached
+            // The table first: it moves the caret the page then goes to.
+            let slid = e.want_scroll && e.slide_to_caret();
+            (e.want_scroll && e.scroll_to_caret(bounds, window)) || reached || slid
         });
         // The scroller read its offset before its child was laid out, so a
         // move made here shows at the next frame, which is asked for: a
@@ -2842,7 +2882,7 @@ impl Element for EditorElement {
         // measured at a width once, in sight or not, so nothing moves
         // when one comes into sight.
         let (pieces, held) = self.editor.update(cx, |e, cx| e.lay_out_pieces(bounds, window, cx));
-        Prepainted { hitbox, wide, pieces, held }
+        Prepainted { hitbox, wide, near, pieces, held }
     }
 
     fn paint(&mut self, _: Option<&GlobalElementId>, _: Option<&InspectorElementId>, bounds: Bounds<Pixels>, _: &mut (), prepaint: &mut Prepainted, window: &mut Window, cx: &mut App) {
@@ -2851,6 +2891,9 @@ impl Element for EditorElement {
         let info = editor.read(cx).paint_info();
         let inks = info.inks;
         window.handle_input(&info.focus, ElementInputHandler::new(bounds, editor.clone()), cx);
+        // The words' pointer over the room a press is taken in, and over
+        // the box whatever the pointer is on there.
+        window.set_cursor_style(CursorStyle::IBeam, &prepaint.near);
         window.set_cursor_style(info.pointer, if info.controls.is_some() { &prepaint.wide } else { &prepaint.hitbox });
 
         let cache = info.cache.borrow();
@@ -2872,7 +2915,7 @@ impl Element for EditorElement {
             let (Some(top), Some(last), Some(last_top), Some(head)) = (cache.tops.get(first_line), cache.entries.get(last_line), cache.tops.get(last_line), cache.entries.get(first_line)) else { continue };
             let bottom = last_top + last.height;
             if let (Row::Table(t), true) = (&*head.row, visible(*top, bottom - top)) {
-                paint_plate(ox + t.inset, oy + top, t.grid.width, bottom - top, head.height, &inks, window);
+                paint_plate(ox + t.inset, oy + top, t.grid.shown(), bottom - top, head.height, &inks, window);
             }
         }
 
@@ -2888,8 +2931,25 @@ impl Element for EditorElement {
             paint_row(&entry.row, ox, oy + top, entry.height, bounds.size.width, line, &info, window, cx);
         }
         drop(cache);
-        if let Some(b) = info.cell {
-            window.paint_quad(quad(Bounds::new(point(px(ox) + b.origin.x, px(oy) + b.origin.y), b.size), px(3.), clear_of(inks.accent), px(1.5), inks.accent, BorderStyle::default()));
+        // Where more of a table lies past a side, its rows fade into the
+        // page there, inside its frame's line.
+        let at = |b: Bounds<Pixels>| Bounds::new(point(px(ox) + b.origin.x, px(oy) + b.origin.y), b.size);
+        for &(frame, left, right) in &info.cuts {
+            let frame = at(frame);
+            let inner = Bounds::new(point(frame.origin.x + px(1.), frame.origin.y + px(1.)), size(frame.size.width - px(2.), frame.size.height - px(2.)));
+            let w = px(TABLE_FADE).min(inner.size.width / 2.);
+            let clear = inks.ground.opacity(0.);
+            if left {
+                window.paint_quad(fill(Bounds::new(inner.origin, size(w, inner.size.height)), linear_gradient(90., linear_color_stop(inks.ground, 0.), linear_color_stop(clear, 1.))));
+            }
+            if right {
+                window.paint_quad(fill(Bounds::new(point(inner.right() - w, inner.origin.y), size(w, inner.size.height)), linear_gradient(90., linear_color_stop(clear, 0.), linear_color_stop(inks.ground, 1.))));
+            }
+        }
+        if let Some((b, frame)) = info.cell {
+            window.with_content_mask(Some(ContentMask { bounds: at(frame) }), |window| {
+                window.paint_quad(quad(at(b), px(3.), clear_of(inks.accent), px(1.5), inks.accent, BorderStyle::default()));
+            });
         }
         if let Some(c) = &info.controls {
             window.with_content_mask(None, |window| paint_controls(c, ox, oy, &inks, window, cx));
@@ -2910,23 +2970,46 @@ impl Element for EditorElement {
             window.paint_quad(fill(*b, inks.selection));
         }
 
-        // The pointer: a press places the caret or takes a widget, a drag
-        // selects, a press on a link follows it.
-        let (hitbox, wide) = (prepaint.hitbox.clone(), prepaint.wide.clone());
-        let ed = editor.clone();
-        window.on_mouse_event(move |ev: &MouseDownEvent, phase, window, cx| {
-            if phase != DispatchPhase::Bubble || ev.button != MouseButton::Left || !wide.is_hovered(window) {
+        // The wheel, before the page's scroller has it: a sideways stroke
+        // over a table wider than its room is the table's.
+        let (hitbox, ed) = (prepaint.hitbox.clone(), editor.clone());
+        let line_h = window.line_height();
+        window.on_mouse_event(move |ev: &ScrollWheelEvent, phase, window, cx| {
+            if phase != DispatchPhase::Capture || !hitbox.should_handle_scroll(window) {
                 return;
             }
             let (x, y) = (f32::from(ev.position.x - bounds.origin.x), f32::from(ev.position.y - bounds.origin.y));
-            let taken = ed.update(cx, |e, cx| e.press_control(x, y, ev.position, cx));
+            if ed.update(cx, |e, cx| e.wheel(x, y, ev.delta.pixel_delta(line_h), ev.delta.precise(), ev.touch_phase, cx)) {
+                cx.stop_propagation();
+            }
+        });
+
+        // The pointer: a press places the caret or takes a widget, a drag
+        // selects, a press on a link follows it.
+        let (hitbox, wide, near) = (prepaint.hitbox.clone(), prepaint.wide.clone(), prepaint.near.clone());
+        let ed = editor.clone();
+        window.on_mouse_event(move |ev: &MouseDownEvent, phase, window, cx| {
+            if phase != DispatchPhase::Bubble || ev.button != MouseButton::Left {
+                return;
+            }
+            // Beside the box, in the room around it: the editor's too.
+            let beside = !hitbox.is_hovered(window) && near.is_hovered(window);
+            if !wide.is_hovered(window) && !beside {
+                return;
+            }
+            let (x, y) = (f32::from(ev.position.x - bounds.origin.x), f32::from(ev.position.y - bounds.origin.y));
+            let taken = wide.is_hovered(window) && ed.update(cx, |e, cx| e.press_control(x, y, ev.position, cx));
             if taken {
                 crate::workbench::swallow_click(window, cx);
                 return;
             }
-            if !hitbox.is_hovered(window) {
+            if !hitbox.is_hovered(window) && !beside {
                 return;
             }
+            // A press beside the box is one at the nearest place in it:
+            // level with the pointer at the box's side, or under it in
+            // the first line or the last.
+            let (x, y) = if beside { (x.clamp(0., (f32::from(bounds.size.width) - 1.).max(0.)), y.clamp(0., (f32::from(bounds.size.height) - 1.).max(0.))) } else { (x, y) };
             // The press is the editor's: the view around it hears a press
             // off the words only.
             ed.update(cx, |e, cx| {
@@ -2937,7 +3020,9 @@ impl Element for EditorElement {
                 if !e.focus.is_focused(window) {
                     window.focus(&e.focus, cx);
                 }
-                match e.hit(x, y) {
+                // Beside the box nothing is pressed but the words' place:
+                // no link is followed and no box ticked from the margin.
+                match if beside { None } else { e.hit(x, y) } {
                     Some(Hit::Task(line)) if !e.read_only => {
                         e.toggle_task_on(line, cx);
                         e.doc.end_step();
@@ -3062,16 +3147,30 @@ impl Editor {
         let (sa, _) = self.sel.range();
         let origin = self.origin;
         let shift = |b: Bounds<Pixels>| Bounds::new(point(origin.x + b.origin.x, origin.y + b.origin.y), b.size);
-        let caret = (self.sel.is_caret() && self.caret_shown()).then(|| self.caret_at(sa)).flatten().map(|c| shift(Bounds::new(point(px(c.x), px(c.bar_y)), size(px(CARET_W), px(c.bar_h)))));
+        // A caret in a table's column that is scrolled out of sight is not drawn.
+        let caret = (self.sel.is_caret() && self.caret_shown()).then(|| self.caret_at(sa)).flatten().filter(|c| self.table_shows(sa.line, c.x)).map(|c| shift(Bounds::new(point(px(c.x), px(c.bar_y)), size(px(CARET_W), px(c.bar_h)))));
         let on = self.hover.and_then(|_| self.control_at(self.pointer_at.0, self.pointer_at.1));
         let cache = self.cache.borrow();
+        let cuts = self
+            .analysis
+            .tables
+            .iter()
+            .filter_map(|t| cells::table_box(t, &cache))
+            .filter(|b| b.grid.slack() > 0.)
+            .map(|b| {
+                let slid = b.grid.slide.get();
+                (Bounds::new(point(px(b.left), px(b.top)), size(px(b.right - b.left), px(b.bottom - b.top))), slid > 1., b.grid.slack() - slid > 1.)
+            })
+            .collect();
         let span = |line: usize| Some((*cache.tops.get(line)?, cache.entries.get(line)?.height));
         let cell = self.revealing().then(|| self.cell_of(self.sel.head)).flatten().and_then(|at| {
             let t = self.table(at.table)?;
             let b = cells::table_box(t, &cache)?;
             let (top, height) = span(t.line_of(at.row))?;
             let (x, w) = (*b.grid.xs.get(at.col)?, *b.grid.cols.get(at.col)?);
-            Some(Bounds::new(point(px(b.left + x), px(top)), size(px(w), px(height + 1.))))
+            // With what shows of the table, which it is drawn inside.
+            let frame = Bounds::new(point(px(b.left), px(b.top)), size(px(b.right - b.left), px(b.bottom - b.top + 1.)));
+            Some((Bounds::new(point(px(b.origin + x), px(top)), size(px(w), px(height + 1.))), frame))
         });
         let controls = self.hover.and_then(|h| {
             let t = self.table(h.first)?;
@@ -3090,8 +3189,8 @@ impl Editor {
             }
             cells::TableDrag::Column { first, col, to, moved: true, .. } => {
                 let b = cells::table_box(self.table(*first)?, &cache)?;
-                let x = b.left + b.grid.xs.get(*to)? + if to > col { *b.grid.cols.get(*to)? } else { 0. };
-                Some(Bounds::new(point(px(x - 1.), px(b.top)), size(px(2.), px(b.bottom - b.top))))
+                let x = b.origin + b.grid.xs.get(*to)? + if to > col { *b.grid.cols.get(*to)? } else { 0. };
+                (x >= b.left - 1. && x <= b.right + 1.).then(|| Bounds::new(point(px(x - 1.), px(b.top)), size(px(2.), px(b.bottom - b.top))))
             }
             _ => None,
         });
@@ -3111,9 +3210,78 @@ impl Editor {
             caret,
             find: self.find.clone(),
             cell,
+            cuts,
             controls,
             drop_line,
         }
+    }
+
+    /// Whether `x`, from the element's left, is in what shows of the
+    /// table `line` is a row of. True on any other line.
+    fn table_shows(&self, line: usize, x: f32) -> bool {
+        let cache = self.cache.borrow();
+        match cache.entries.get(line).map(|e| &*e.row) {
+            Some(Row::Table(t)) => x >= t.inset - 1. && x <= t.inset + t.grid.shown() + 1.,
+            _ => true,
+        }
+    }
+
+    /// A table wider than its room is scrolled so the caret's cell shows
+    /// whole, or the caret itself in a cell wider than the room. Whether
+    /// it moved.
+    fn slide_to_caret(&self) -> bool {
+        let head = self.sel.head;
+        let cache = self.cache.borrow();
+        let Some(Row::Table(t)) = cache.entries.get(head.line).map(|e| &*e.row) else { return false };
+        if t.grid.slack() <= 0. {
+            return false;
+        }
+        let c = t.column_of(head.col);
+        let (Some(flow), Some(at), Some(w)) = (t.cells.get(c), t.grid.xs.get(c), t.grid.cols.get(c)) else { return false };
+        let (slid, room) = (t.grid.slide.get(), t.grid.shown());
+        // What has to show, from the table's own left whatever its
+        // scroll: the cell, or in one wider than the room the caret with
+        // the cell's padding beside it.
+        let (from, to) = if *w <= room {
+            (*at, at + w)
+        } else {
+            let x = at + CELL_X + flow.caret(head.col).0;
+            let air = CELL_X.min(room / 4.);
+            (x - air, x + air)
+        };
+        t.grid.slide_to(if from < slid { from } else if to > slid + room { to - room } else { slid })
+    }
+
+    /// A sideways stroke of the wheel over a table wider than its room
+    /// scrolls it. A gesture keeps to the way it began, so one that began
+    /// up or down never slides a table it passes over, and one that began
+    /// sideways on a table goes on with that table. False when the stroke
+    /// is the page's.
+    fn wheel(&mut self, x: f32, y: f32, delta: Point<Pixels>, precise: bool, phase: TouchPhase, cx: &mut Context<Self>) -> bool {
+        let sideways = delta.x.abs() > delta.y.abs();
+        let begins = !precise || phase == TouchPhase::Started || self.wheel_on.is_none_or(|(_, at)| at.elapsed() > WHEEL_GAP);
+        if begins {
+            let table = sideways.then(|| self.table_under(x, y)).flatten();
+            self.wheel_on = Some((table, Instant::now()));
+        }
+        let Some((Some(first), _)) = self.wheel_on else { return false };
+        self.wheel_on = Some((Some(first), Instant::now()));
+        let cache = self.cache.borrow();
+        let Some(Row::Table(t)) = cache.entries.get(first).map(|e| &*e.row) else { return false };
+        if t.grid.slide_to(t.grid.slide.get() - f32::from(delta.x)) {
+            cx.notify();
+        }
+        true
+    }
+
+    /// The first line of the table under a point of the page, when it is
+    /// wider than its room.
+    fn table_under(&self, x: f32, y: f32) -> Option<usize> {
+        let cache = self.cache.borrow();
+        self.analysis.tables.iter().find_map(|t| {
+            let b = cells::table_box(t, &cache)?;
+            (b.grid.slack() > 0. && x >= b.left && x <= b.right && y >= b.top && y <= b.bottom).then_some(t.first)
+        })
     }
 
     /// A right click: what it was on, with the selection put as a Mac's

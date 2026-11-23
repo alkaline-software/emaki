@@ -305,6 +305,10 @@ impl Inline {
             return (is_selectable, true, Some((0..self.text.len()).into()));
         }
 
+        // Emaki: in a table's cell, the points go with the table's scroll
+        // and the cell is selected as a cell is (`cells.rs`).
+        let spot = UiGlobalState::global(cx).table_spot();
+
         if let Some(selection) = text_view_state.multi_click_selection() {
             return (
                 is_selectable,
@@ -314,16 +318,24 @@ impl Inline {
                     &self.links,
                     text_layout,
                     *bounds,
-                    selection.pos,
+                    spot.map_or(selection.pos, |spot| spot.click(selection.pos)),
                     selection.kind,
                 )
                 .map(Selection::from),
             );
         }
 
-        let Some((selection_start, selection_end)) = text_view_state.selection_points(cx) else {
+        let Some((mut selection_start, mut selection_end)) = text_view_state.selection_points(cx) else {
             return (is_selectable, false, None);
         };
+        if let Some(spot) = spot {
+            (selection_start, selection_end) = spot.ends(selection_start, selection_end);
+            match spot.taken(selection_start, selection_end) {
+                super::cells::Taken::Band => {}
+                super::cells::Taken::Whole => return (true, true, Some((0..self.text.len()).into())),
+                super::cells::Taken::Nothing => return (true, true, None),
+            }
+        }
         let line_height = window.line_height();
 
         // Use for debug selection bounds

@@ -83,13 +83,37 @@ pub(super) enum TableDrag {
     Column { first: usize, col: usize, x0: f32, to: usize, moved: bool, at: Point<Pixels> },
 }
 
-/// A table's box on the page, from the element's top left.
+/// A table's box on the page, from the element's top left: what shows
+/// of it, which is less than the whole of a table wider than its room.
 pub(super) struct TableBox {
     pub left: f32,
     pub top: f32,
     pub bottom: f32,
     pub right: f32,
+    /// Where the first column's left edge is: left of `left` by as much
+    /// as the table is scrolled.
+    pub origin: f32,
     pub grid: Rc<Grid>,
+}
+
+impl TableBox {
+    /// The column under `x`, a point beside the table the one at that edge.
+    pub fn column_at(&self, x: f32) -> usize {
+        let x = x.clamp(self.left, (self.right - 1.).max(self.left));
+        self.grid.xs.iter().rposition(|at| self.origin + *at <= x).unwrap_or(0)
+    }
+
+    /// The middle of what shows of a column, where its handle stands.
+    pub fn column_mid(&self, col: usize) -> Option<f32> {
+        let (x, w) = (self.origin + self.grid.xs.get(col)?, *self.grid.cols.get(col)?);
+        Some((x.max(self.left) + (x + w).min(self.right)) / 2.)
+    }
+
+    /// A column's right edge, where it shows.
+    pub fn edge(&self, col: usize) -> Option<f32> {
+        let x = self.origin + self.grid.xs.get(col)? + self.grid.cols.get(col)?;
+        (x >= self.left && x <= self.right + 1.).then_some(x)
+    }
 }
 
 /// The rows' tops and foots of a table, by row.
@@ -102,7 +126,7 @@ pub(super) fn table_box(t: &Table, cache: &Cache) -> Option<TableBox> {
     let Row::Table(r) = &*cache.entries.get(t.first)?.row else { return None };
     let last = cache.entries.get(t.last)?;
     let (left, top) = (r.inset, cache.tops[t.first]);
-    Some(TableBox { left, top, bottom: cache.tops[t.last] + last.height, right: left + r.grid.width, grid: r.grid.clone() })
+    Some(TableBox { left, top, bottom: cache.tops[t.last] + last.height, right: left + r.grid.shown(), origin: r.left(), grid: r.grid.clone() })
 }
 
 impl Editor {
@@ -479,7 +503,7 @@ impl Editor {
                         continue;
                     }
                     let row = (0..t.rows.len()).rev().find(|r| row_span(t, *r, &cache).is_some_and(|(top, _)| top <= y)).unwrap_or(0);
-                    let col = b.grid.xs.iter().rposition(|at| b.left + *at <= x).unwrap_or(0);
+                    let col = b.column_at(x);
                     found = Some((t.first, row, col));
                     break;
                 }
@@ -510,13 +534,12 @@ impl Editor {
         if x >= b.left - GRIP_SHORT && x <= b.left + GRIP_SHORT / 2. && (y - (top + foot) / 2.).abs() <= (GRIP_LONG / 2. + 4.).min((foot - top) / 2. + 2.) {
             return Some(Control::RowGrip(hover.row));
         }
-        let (cx0, cw) = (b.left + b.grid.xs.get(hover.col)?, *b.grid.cols.get(hover.col)?);
-        if y >= b.top - GRIP_SHORT && y <= b.top + GRIP_SHORT / 2. && (x - (cx0 + cw / 2.)).abs() <= GRIP_LONG / 2. + 4. {
+        if y >= b.top - GRIP_SHORT && y <= b.top + GRIP_SHORT / 2. && (x - b.column_mid(hover.col)?).abs() <= GRIP_LONG / 2. + 4. {
             return Some(Control::ColumnGrip(hover.col));
         }
         if y >= b.top && y <= b.bottom {
-            for (c, (at, w)) in b.grid.xs.iter().zip(&b.grid.cols).enumerate() {
-                if (x - (b.left + at + w)).abs() <= EDGE {
+            for c in 0..b.grid.cols.len() {
+                if b.edge(c).is_some_and(|at| (x - at).abs() <= EDGE) {
                     return Some(Control::Edge(c));
                 }
             }
@@ -556,7 +579,7 @@ impl Editor {
             let cache = self.cache.borrow();
             let t = self.table(first);
             let row = t.and_then(|t| (0..t.rows.len()).rev().find(|r| row_span(t, *r, &cache).is_some_and(|(top, _)| top <= y)));
-            let col = t.and_then(|t| table_box(t, &cache)).map(|b| b.grid.xs.iter().rposition(|at| b.left + *at <= x).unwrap_or(0));
+            let col = t.and_then(|t| table_box(t, &cache)).map(|b| b.column_at(x));
             (row.unwrap_or(0), col.unwrap_or(0))
         };
         match self.table_drag.as_mut() {
@@ -570,8 +593,10 @@ impl Editor {
                     now[col] = (now[col] + d).clamp(LEAST_COLUMN, (total - LEAST_COLUMN).max(LEAST_COLUMN));
                     now[col + 1] = total - now[col];
                 } else {
+                    // The last column grows to the room's edge; in a
+                    // table already wider than its room it only narrows.
                     let others: f32 = now[..col].iter().sum();
-                    now[col] = (now[col] + d).clamp(LEAST_COLUMN, (room - others).max(LEAST_COLUMN));
+                    now[col] = (now[col] + d).clamp(LEAST_COLUMN, (room - others).max(now[col]).max(LEAST_COLUMN));
                 }
                 self.hold = Some((first, now));
             }

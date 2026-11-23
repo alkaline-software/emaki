@@ -88,6 +88,11 @@ impl Workbench {
                 e.set_header(dialect.is_none(), cx);
                 e.set_text(&source, cx);
                 e.scroll = scroll;
+                // A press in the pane's margin beside the words or over
+                // them is the editor's, as one in the composer's room is.
+                // Under the last line it is the pane's (`doc_pane_pressed`).
+                let (side, top) = super::FILE_PAD;
+                e.set_press_room(Edges { top: px(top), right: px(side), bottom: px(0.), left: px(side) });
             });
             let subs = vec![cx.subscribe_in(&editor, window, |this, editor, ev: &EditorEvent, window, cx| match ev {
                 EditorEvent::Changed => this.doc_changed(window, cx),

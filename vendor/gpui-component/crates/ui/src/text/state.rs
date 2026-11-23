@@ -539,6 +539,21 @@ impl TextViewState {
         self.selection_adapter.selection_points(cx)
     }
 
+    /// Emaki: the selection's ends with the points it keeps for them
+    /// (`TextViewSelectionAdapter::selection_ends`).
+    pub(crate) fn selection_ends(&self, cx: &App) -> Option<([(Point<Pixels>, Point<Pixels>); 2], bool)> {
+        if !self.selectable {
+            return None;
+        }
+        self.selection_adapter.selection_ends(cx)
+    }
+
+    /// Emaki: a double click's point as it is kept, and where that is in
+    /// the window now.
+    pub(crate) fn multi_click_points(&self) -> Option<(Point<Pixels>, Point<Pixels>)> {
+        self.multi_click_selection.map(|selection| (selection.pos, selection.pos + self.scroll_offset() + self.bounds.origin))
+    }
+
     pub(crate) fn has_selection(&self, cx: &App) -> bool {
         self.has_view_selection() || self.selection_points(cx).is_some()
     }

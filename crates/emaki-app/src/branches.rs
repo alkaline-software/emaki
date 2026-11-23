@@ -42,8 +42,10 @@ pub(crate) enum CommitDo {
 const HISTORY_MOST: usize = 300;
 /// The most a commit's files take under the commits before they scroll.
 const HISTORY_FILES_H: f32 = 190.;
-/// The files' own column, and the window's width from which they have one.
-const HISTORY_FILES_W: f32 = 270.;
+/// The files' own column as it is before it is dragged, the least it is
+/// dragged to, and the window's width from which they have one.
+pub(crate) const HISTORY_FILES_W: Pixels = px(270.);
+const HISTORY_FILES_MIN: Pixels = px(180.);
 const HISTORY_WIDE: f32 = 980.;
 
 /// The name the history keeps a commit's file's lines under.
@@ -584,9 +586,14 @@ impl Workbench {
     /// The history's side of the sheet: the commits at the left with the
     /// picked one's files under them, and at the right that commit's
     /// words over the lines of the file picked.
-    pub(crate) fn render_history(&self, body: AnyElement, counts: Option<(usize, usize)>, cx: &mut Context<Self>) -> AnyElement {
+    pub(crate) fn render_history(&self, body: AnyElement, counts: Option<(usize, usize)>, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
         let theme = cx.theme().clone();
         let Some(c) = &self.changes else { return div().into_any_element() };
+        // The files have a column of their own in a window wide enough,
+        // and stand under the commits in a narrower one: the room a
+        // file's row has for its path is that column's.
+        let wide = self.history_wide();
+        let path_room = f32::from(if wide { self.history_files_w_now() } else { self.changes_w_now() }) - crate::panels::PATH_CHROME;
         let dark = theme.mode.is_dark();
         let (hover, chosen_bg, quiet) = (crate::panels::row_hover(&theme, dark), theme.primary.opacity(if dark { 0.18 } else { 0.12 }), theme.muted_foreground);
         let now = crate::format::now_secs();
@@ -662,8 +669,13 @@ impl Workbench {
                         this.history_file_menu(menu_path.clone(), e.position, cx);
                     }),
                 )
+                // A path that is cut is whole under the pointer.
+                .when(crate::panels::list_words_w(path, FontWeight::NORMAL, window, cx) > path_room, |d| {
+                    let whole = path.clone();
+                    d.managed_tooltip(move |window, cx| crate::workbench::tip(whole.clone(), window, cx))
+                })
                 .child(img(crate::file_icons::path(&name, false, false, dark)).size(px(16.)).flex_shrink_0())
-                .child(h_flex().flex_1().min_w_0().child(div().min_w_0().truncate().text_color(quiet).child(folder)).child(div().flex_shrink_0().text_color(theme.foreground).child(name)))
+                .child(crate::panels::path_words(folder, name, quiet, theme.foreground))
                 .child(div().w(px(12.)).flex_shrink_0().flex().justify_center().text_size(px(11.)).text_color(crate::panels::git_color(*state, dark)).children(state.letter()))
         });
         let file_rows: Vec<_> = file_rows.collect();
@@ -674,7 +686,6 @@ impl Workbench {
         // picked one's files, the picked file's lines, with the commit's
         // words over the last two. In a window too narrow to leave the
         // lines their room the files go under the commits instead.
-        let wide = self.view_w >= px(HISTORY_WIDE);
         let files_head = div().flex_shrink_0().px(px(14.)).pt(px(9.)).pb(px(4.)).text_size(px(11.)).font_weight(FontWeight::MEDIUM).text_color(quiet).child(if wide { count(n_files, "{n} changed file", "{n} changed files") } else { tf("{files} in this commit", &[("files", &count(n_files, "{n} file", "{n} files"))]) });
         // Both lists keep a little room under what scrolls, so a row cut
         // at the foot stays inside the sheet's corner.
@@ -735,19 +746,117 @@ impl Workbench {
         let lines = v_flex().flex_1().min_w_0().children(file_head).child(div().flex_1().min_h_0().child(body));
         let left = v_flex().w(self.changes_w_now()).flex_shrink_0().border_r_1().border_color(theme.border).bg(theme.sidebar).rounded_bl(px(15.)).child(commits_list);
         if wide {
-            let files = v_flex().w(px(HISTORY_FILES_W)).flex_shrink_0().border_r_1().border_color(theme.border).bg(theme.sidebar.opacity(0.5)).child(files_head).child(files_list);
+            let files = v_flex().w(self.history_files_w_now()).flex_shrink_0().border_r_1().border_color(theme.border).bg(theme.sidebar.opacity(0.5)).child(files_head).child(files_list);
+            // The files' divider is theirs alone, under the commit's words.
+            let grip = (n_files > 0).then(|| self.history_files_grip(cx));
             return h_flex()
                 .relative()
                 .flex_1()
                 .min_h_0()
                 .items_stretch()
                 .child(left)
-                .child(v_flex().flex_1().min_w_0().children(head).child(h_flex().flex_1().min_h_0().items_stretch().when(n_files > 0, |d| d.child(files)).child(lines)))
+                .child(v_flex().flex_1().min_w_0().children(head).child(h_flex().relative().flex_1().min_h_0().items_stretch().when(n_files > 0, |d| d.child(files)).child(lines).children(grip)))
                 .children(self.changes_grip(cx))
                 .into_any_element();
         }
         let left = left.when(n_files > 0, |d| d.child(v_flex().flex_shrink_0().border_t_1().border_color(theme.border).child(files_head).child(files_list)));
         h_flex().relative().flex_1().min_h_0().items_stretch().child(left).child(v_flex().flex_1().min_w_0().children(head).child(lines)).children(self.changes_grip(cx)).into_any_element()
+    }
+
+    /// Whether the history has a column for a commit's files: in a
+    /// narrower window they stand under the commits.
+    pub(crate) fn history_wide(&self) -> bool {
+        self.view_w >= px(HISTORY_WIDE)
+    }
+
+    /// The width of the files' column as drawn: what it was dragged to,
+    /// less where the lines beside it would have under their least.
+    pub(crate) fn history_files_w_now(&self) -> Pixels {
+        let most = (self.changes_sheet.get().size.width - self.changes_w_now() - crate::panels::CHANGES_LINES_MIN).max(HISTORY_FILES_MIN);
+        self.history_files_w.clamp(HISTORY_FILES_MIN, most)
+    }
+
+    /// The files' divider follows the pointer.
+    pub(crate) fn history_files_drag_to(&mut self, e: &MouseMoveEvent, cx: &mut Context<Self>) {
+        if e.pressed_button != Some(MouseButton::Left) {
+            self.history_files_drag_end();
+            cx.notify();
+            return;
+        }
+        self.history_files_w = e.position.x - self.changes_sheet.get().left() - self.changes_w_now();
+        self.history_files_w = self.history_files_w_now();
+        cx.notify();
+    }
+
+    pub(crate) fn history_files_drag_end(&mut self) {
+        if std::mem::take(&mut self.history_files_drag) {
+            self.save_ui(true);
+        }
+    }
+
+    /// The divider between a commit's files and the lines: a drag and a
+    /// double click, as the one beside the commits takes them
+    /// (`changes_grip`).
+    fn history_files_grip(&self, cx: &mut Context<Self>) -> AnyElement {
+        let line = cx.theme().primary.opacity(0.55);
+        let held = self.history_files_drag;
+        div()
+            .id("history-files-grip")
+            .group("history-files-grip")
+            .absolute()
+            .top_0()
+            .bottom_0()
+            .left(self.history_files_w_now() - crate::panels::PANEL_GRIP / 2.)
+            .w(crate::panels::PANEL_GRIP)
+            .occlude()
+            .cursor(CursorStyle::ResizeLeftRight)
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(|this, ev: &MouseDownEvent, window, cx| {
+                    if ev.click_count == 2 {
+                        this.history_files_drag = false;
+                        this.history_files_fit_wanted = true;
+                    } else {
+                        this.history_files_drag = true;
+                    }
+                    swallow_click(window, cx);
+                    cx.notify();
+                }),
+            )
+            .child(div().absolute().top_0().h_full().left(crate::panels::PANEL_GRIP / 2. - px(1.5)).w(px(2.)).when(held, |d| d.bg(line)).group_hover("history-files-grip", move |s| s.bg(line)))
+            .into_any_element()
+    }
+
+    /// The picked commit's files' paths, each as wide as it is drawn in
+    /// full, the widest: what a double click on a divider fits.
+    pub(crate) fn history_paths_w(&self, window: &Window, cx: &App) -> f32 {
+        let Some(c) = &self.changes else { return 0. };
+        let files = c.commit_files.as_ref().filter(|(of, _)| Some(of) == c.commit.as_ref()).map(|(_, f)| f.as_slice()).unwrap_or_default();
+        files.iter().map(|(path, _)| crate::panels::list_words_w(path, FontWeight::NORMAL, window, cx)).fold(0., f32::max)
+    }
+
+    /// The width a double click on the files' divider goes to: the
+    /// longest path of the commit's, or as much of it as leaves the lines
+    /// their room.
+    pub(crate) fn history_files_fit(&self, window: &Window, cx: &App) -> Pixels {
+        let most = (self.changes_sheet.get().size.width - self.changes_w_now() - crate::panels::CHANGES_LINES_MIN).max(HISTORY_FILES_MIN);
+        px((self.history_paths_w(window, cx) + crate::panels::PATH_CHROME + 8.).ceil()).clamp(HISTORY_FILES_MIN, most)
+    }
+
+    /// The widest of the history's commits as its row draws it: its
+    /// first line with its tag and its arrow, or the line under it.
+    pub(crate) fn history_commits_w(&self, window: &Window, cx: &App) -> f32 {
+        let Some(commits) = self.changes.as_ref().and_then(|c| c.commits.clone()) else { return 0. };
+        let now = crate::format::now_secs();
+        commits
+            .iter()
+            .map(|m| {
+                let tag = m.tags.first().map_or(0., |t| crate::panels::list_words_w(t, FontWeight::NORMAL, window, cx) + 12. + 8.);
+                let arrow = if m.local { 12. + 8. } else { 0. };
+                let under = crate::panels::list_words_w(&format!("{} \u{b7} {}", m.author, crate::format::ago(m.when as f64, now)), FontWeight::NORMAL, window, cx);
+                crate::panels::list_words_w(&m.summary, FontWeight::MEDIUM, window, cx).max(under) + tag + arrow
+            })
+            .fold(0., f32::max)
     }
 
     // -- committing -----------------------------------------------------------

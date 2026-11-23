@@ -1,3 +1,4 @@
+mod cells;
 mod document;
 mod edit;
 mod find;
@@ -17,6 +18,7 @@ mod utils;
 mod window_selection;
 
 use gpui::{App, ElementId, IntoElement, RenderOnce, SharedString, Window};
+pub(crate) use cells::TableSpot;
 pub use find::{HeadingSpots, KeptViews, TextAt, TextFind, TextHits};
 pub use inline::right_clicked_link;
 pub use edit::{EditSlot, EditUnit, UnitClick, UnitClickFn, UnitKind};
