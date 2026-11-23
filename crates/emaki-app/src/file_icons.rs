@@ -21,9 +21,12 @@
 //! `folder_codex`, `folder_gemini`, `folder_agents` and `folder_r` (`R`,
 //! `renv`). Kinds one of the theme's own icons fits are added under that
 //! icon (`.rds` under R's data, a DuckDB file under the database, `target`
-//! under the folder of what is built). One of the theme's is changed:
+//! under the folder of what is built). Two of the theme's are changed:
 //! `folder_github`'s mark is GitHub's orchid, as the Agents page wears
-//! it, where the theme's is gray.
+//! it, where the theme's is gray; and `rust` and `rust-config` are
+//! Rust's own mark, its sprocket with its R, in the theme's line and
+//! its peach, where the theme draws the crab, which read as a creature
+//! with eyes among the letters and signs of the other languages.
 //! The icons carry their own colors, so they are drawn as
 //! pictures (`img`), not as the one-color masks the window's other
 //! icons are.
