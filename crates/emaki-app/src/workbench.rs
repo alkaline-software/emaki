@@ -13091,6 +13091,10 @@ impl Workbench {
                         .flex_1()
                         .min_h_0()
                         .child(v_flex().id("side-scroll").flex_1().min_h_0().overflow_y_scroll().track_scroll(&self.side_scroll).px(px(SIDE_INSET)).child(scroll.pt(px(SIDE_INSET))))
+                        // What is cut says so: the projects fade into the
+                        // card at an edge with more past it.
+                        .child(crate::look::edge_fade(&self.side_scroll, theme.sidebar.blend(card_bg), true))
+                        .child(crate::look::edge_fade(&self.side_scroll, theme.sidebar.blend(card_bg), false))
                         .vertical_scrollbar(&self.side_scroll),
                 )
                 // What the section put away that is open holds, over the
@@ -16768,6 +16772,12 @@ impl Workbench {
             .when_some(chat_font, |d, f| d.faced(f, cx))
             .child(gpui_base::ElementExt::text_selection_region(div().size_full().child(list_view), SELECT_CONVERSATION))
             .child(canvas(move |_, window, cx| kept.keep(window, cx), move |_, _, window, cx| marks.paint(window, cx)).absolute().size_0())
+            // What is cut says so: the conversation fades into the page
+            // at an edge with more past it, by the list's own offset.
+            .children([true, false].map(|top| {
+                let list = list.clone();
+                crate::look::edge_fade_by(move |_| (-list.scroll_px_offset_for_scrollbar().y, list.max_offset_for_scrollbar().y), theme.background, top)
+            }))
             // Not while the layouts trade places: the bar would travel
             // with the conversation's card.
             .when(cli_live.is_none(), |d| d.vertical_scrollbar(&list))

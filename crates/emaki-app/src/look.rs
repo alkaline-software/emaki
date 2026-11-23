@@ -100,6 +100,61 @@ pub fn file_ground(theme: &Theme) -> gpui::Hsla {
 /// there, the margin stood out of the pane as a lighter strip.
 const FILE_GROUND: (u32, u32) = (0xf7f6f3, 0x1b1a19);
 
+/// How tall a scroller's edge fade stands.
+pub const FADE_H: f32 = 28.;
+/// How far from the end of a scroll its edge's fade is whole.
+const FADE_ROOM: f32 = 56.;
+
+/// How strong an edge's fade stands with this much left to scroll past
+/// it: none at the end, whole once `FADE_ROOM` is left, so it comes and
+/// goes with the scroll and does not snap on at the first pixel.
+fn fade_strength(room: f32) -> f32 {
+    let t = (room / FADE_ROOM).clamp(0., 1.);
+    t * t * (3. - 2. * t)
+}
+
+/// A scroller's edge fading into its ground while there is more beyond
+/// it, as Onyx's page does: what is cut says so. Set after the scroller
+/// in the box it fills, and before its scrollbar, which stays on top. It
+/// takes no press and no hover, so a row under it is still a row.
+///
+/// It reads the handle as it is placed, since a scroller's length is
+/// known only once it is laid out: read in `render` it would be a frame
+/// late, and missing from the first frame of a long file. `ground` is the
+/// color the scroller stands on, whole: a ground that is a wash over
+/// another is the two blended.
+///
+/// The box it comes in is across the scroller at that edge; a caller
+/// moves an edge of it where something else stands there (the tree's
+/// held folders, the editor's ruler).
+pub fn edge_fade(handle: &gpui::ScrollHandle, ground: gpui::Hsla, top: bool) -> gpui::Div {
+    let handle = handle.clone();
+    edge_fade_by(move |_| (-handle.offset().y, handle.max_offset().y), ground, top)
+}
+
+/// An edge's fade over what keeps its own offset (the conversation's
+/// list, the code editor): `room` says how far it is scrolled down and
+/// how far it can go.
+pub fn edge_fade_by(room: impl Fn(&App) -> (gpui::Pixels, gpui::Pixels) + 'static, ground: gpui::Hsla, top: bool) -> gpui::Div {
+    use gpui::{canvas, div, fill, linear_color_stop, linear_gradient, px, ParentElement as _, Styled as _};
+    let paint = canvas(
+        move |_, _, cx| {
+            let (at, most) = room(cx);
+            fade_strength(f32::from(if top { at } else { most - at }))
+        },
+        move |bounds, strength, window, _| {
+            if strength <= 0. {
+                return;
+            }
+            let (from, to) = if top { (ground.opacity(strength), ground.opacity(0.)) } else { (ground.opacity(0.), ground.opacity(strength)) };
+            window.paint_quad(fill(bounds, linear_gradient(180., linear_color_stop(from, 0.), linear_color_stop(to, 1.))));
+        },
+    )
+    .size_full();
+    let edge = div().absolute().left_0().right_0().h(px(FADE_H));
+    if top { edge.top_0() } else { edge.bottom_0() }.child(paint)
+}
+
 /// The room between a list row's plate and its edge, at its top and foot.
 pub const ROW_BREATH: f32 = 1.5;
 
@@ -249,4 +304,20 @@ pub fn apply(appearance: &str, window: Option<&mut Window>, cx: &mut App) {
 pub fn install_languages() {
     use gpui_component::highlighter::{LanguageConfig, LanguageRegistry};
     LanguageRegistry::singleton().register("r", &LanguageConfig::new("r", tree_sitter_r::LANGUAGE.into(), vec![], tree_sitter_r::HIGHLIGHTS_QUERY, "", tree_sitter_r::LOCALS_QUERY));
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn an_edge_fade_grows_with_the_room_left() {
+        assert_eq!(fade_strength(0.), 0.);
+        assert_eq!(fade_strength(-40.), 0.);
+        assert_eq!(fade_strength(FADE_ROOM), 1.);
+        assert_eq!(fade_strength(FADE_ROOM * 4.), 1.);
+        let steps: Vec<f32> = (0..=56).map(|r| fade_strength(r as f32 * FADE_ROOM / 56.)).collect();
+        assert!(steps.windows(2).all(|w| w[1] > w[0]), "it rises at every step");
+        assert!(steps.windows(2).all(|w| w[1] - w[0] < 0.05), "no step is a jump");
+    }
 }

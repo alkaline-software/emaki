@@ -115,6 +115,10 @@ const PIN_H: Pixels = px(30.);
 pub(crate) const CONVERSATION_MIN: Pixels = px(480.);
 /// How wide the strip at the panel's edge that takes the drag is.
 pub(crate) const PANEL_GRIP: Pixels = px(8.);
+/// The strip at the code editor's right edge that its scrollbar and its
+/// marks run in (the vendored `RULER_WIDTH`): the editor's fades stop at
+/// it.
+const EDITOR_RULER: f32 = 12.;
 /// In a folder of checkouts, the panel width from which the branch is
 /// named in the head beside the checkout.
 const NAMED_BRANCH_AT: Pixels = px(300.);
@@ -6858,6 +6862,9 @@ impl Workbench {
         // what they hold scrolls under them, as VS Code's explorer holds
         // them; the last pushed up by the folder after it.
         let sticky = if exists { tree_sticky(&rows, f32::from(-self.files_scroll.offset().y), f32::from(self.files_scroll.bounds().size.height)) } else { Vec::new() };
+        // Where the held folders end, which is where the rows are cut and
+        // the tree's top fade begins.
+        let held_foot = sticky.iter().map(|(_, y)| y + f32::from(TREE_ROW_H)).fold(0f32, f32::max);
         let sticky = (!sticky.is_empty()).then(|| {
             let ground = crate::look::files_ground(&theme);
             let last = sticky.len() - 1;
@@ -7185,6 +7192,11 @@ impl Workbench {
                         }))
                         .child(list),
                 )
+                // What is cut says so: the rows fade into the panel at an
+                // edge with more past it, the top one from under the
+                // folders held there.
+                .child(crate::look::edge_fade(&self.files_scroll, crate::look::files_ground(&theme), true).top(px(held_foot)))
+                .child(crate::look::edge_fade(&self.files_scroll, crate::look::files_ground(&theme), false))
                 .children(sticky)
                 .children(drop_words)
                 // The rectangle, over the rows, cut to the panel.
@@ -9882,6 +9894,16 @@ impl Workbench {
             let editor = gpui_component::input::Editor::new(state).readonly(readonly).appearance(false).bordered(false).h_full().font_family(theme.mono_font_family.clone()).text_size(px(self.cfg.app.text_sizes().editor)).on_secondary_click(menu).into_any_element();
             self.sublime_wrap(editor, cx)
         });
+        // The editor's own fades: it keeps its offset itself, and its
+        // right edge is the strip its scrollbar and marks stand in.
+        let editor_fades = self.file_editor.as_ref().filter(|_| editor.is_some()).map(|ed| {
+            let ground = crate::look::file_ground(&theme);
+            [true, false].map(|top| {
+                let state = ed.state.downgrade();
+                crate::look::edge_fade_by(move |cx| state.upgrade().map_or((px(0.), px(0.)), |s| s.read(cx).scroll_room()), ground, top).right(px(EDITOR_RULER))
+            })
+        });
+        let editor_fades = editor_fades.into_iter().flatten();
         let word = self.word.as_ref().filter(|w| matches!(v.body, FileBody::Word) && !leaving && w.read(cx).path == v.path).map(|w| {
             // Its list over the pages keeps the gesture begun on it.
             if let Some(list) = w.read(cx).pick_scroll() {
@@ -10311,7 +10333,10 @@ impl Workbench {
                             (Some(word), _) => d.child(div().flex_1().min_h_0().child(word)),
                             // The editor scrolls itself; the wrapper only
                             // says where the pane's body is.
-                            (None, Some(editor)) => d.child(div().id("file-body").flex_1().min_h_0().track_scroll(&self.file_view_scroll).pt(px(6.)).font_family(theme.mono_font_family.clone()).text_size(px(12.5)).child(editor)).children(cut),
+                            // Its lines fade at an edge with more past
+                            // it, by its own offset, up to the strip its
+                            // scrollbar and marks stand in.
+                            (None, Some(editor)) => d.child(div().id("file-body").flex_1().min_h_0().track_scroll(&self.file_view_scroll).pt(px(6.)).font_family(theme.mono_font_family.clone()).text_size(px(12.5)).child(div().relative().size_full().child(editor).children(editor_fades))).children(cut),
                             // What is wider than the pane keeps its own
                             // width: stretched across the scroller, as a
                             // column's child is, it was as wide as the
@@ -10322,7 +10347,13 @@ impl Workbench {
                                 // scroller and the numbers at its left,
                                 // outside it (`render_table_heads`).
                                 Some((top, side)) => d.child(top).child(h_flex().flex_1().min_h_0().items_stretch().child(side).child(v_flex().relative().flex_1().min_w_0().min_h_0().child(scroller.items_start().overflow_scroll().child(body)).vertical_scrollbar(&self.file_view_scroll))),
-                                None => d.child(if wide { scroller.items_start().overflow_scroll().child(body) } else { scroller.overflow_y_scroll().child(body) }).vertical_scrollbar(&self.file_view_scroll),
+                                // What is cut says so: the file fades into
+                                // the pane at an edge with more past it.
+                                None => d
+                                    .child(if wide { scroller.items_start().overflow_scroll().child(body) } else { scroller.overflow_y_scroll().child(body) })
+                                    .child(crate::look::edge_fade(&self.file_view_scroll, crate::look::file_ground(&theme), true))
+                                    .child(crate::look::edge_fade(&self.file_view_scroll, crate::look::file_ground(&theme), false))
+                                    .vertical_scrollbar(&self.file_view_scroll),
                             },
                         }),
                 ),

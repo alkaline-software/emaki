@@ -2441,6 +2441,12 @@ impl<M: InputModeKind> InputBaseState<M> {
         self.scroll_handle.offset()
     }
 
+    /// (Emaki addition.) How far the view is scrolled down and how far it
+    /// can go, from the last layout: for an edge's fade over the editor.
+    pub fn scroll_room(&self) -> (gpui::Pixels, gpui::Pixels) {
+        (-self.scroll_handle.offset().y, (self.scroll_size.height - self.input_bounds.size.height).max(gpui::px(0.)))
+    }
+
     /// Set scroll offset of the editor viewport.
     ///
     /// The offset will be clamped to the valid range, and applied after the next layout.
